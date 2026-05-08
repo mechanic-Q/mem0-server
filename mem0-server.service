@@ -1,0 +1,21 @@
+[Unit]
+Description=mem0 self-hosted memory server
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/docker start qdrant
+ExecStart=/home/lmr/.mem0-server/venv/bin/python /home/lmr/.mem0-server/server.py
+WorkingDirectory=/home/lmr/.mem0-server
+Environment=MEM0_PORT=8050
+Environment=MEM0_DIR=/home/lmr/.mem0-server/data
+Environment=HF_ENDPOINT=https://hf-mirror.com
+Environment=HUGGINGFACE_HUB_URL=https://hf-mirror.com
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

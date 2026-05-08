@@ -1,0 +1,12 @@
+venv/
+models/
+data/
+qdrant-data/
+__pycache__/
+*.pyc
+.zhipu_key
+.openrouter_key
+.deepseek_key
+.env
+*.bak
+*.bak.*
