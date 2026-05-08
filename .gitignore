@@ -10,3 +10,5 @@ __pycache__/
 .env
 *.bak
 *.bak.*
+# Runtime blacklist — regenerated automatically
+provider_blacklist.json
