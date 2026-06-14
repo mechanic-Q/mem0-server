@@ -4,7 +4,7 @@
 
 PORT=8050
 TMUX_SESSION="mem0"
-AUTOSTART="/home/lmr/.mem0-server/scripts/auto-start.sh"
+AUTOSTART="${HOME}/.mem0-server/scripts/auto-start.sh"
 
 # Check if port is listening
 if curl -s --max-time 5 "http://localhost:${PORT}/v1/health" > /dev/null 2>&1; then

@@ -7,7 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MEM0_HOME="${MEM0_HOME:-$HOME/.mem0-server}"
 VENV_DIR="${MEM0_HOME}/venv"
-SDK_MAIN="${VENV_DIR}/lib/python3.11/site-packages/mem0/memory/main.py"
+PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "3.11")
+SDK_MAIN="${VENV_DIR}/lib/python${PYTHON_VERSION}/site-packages/mem0/memory/main.py"
 HERMES_SCRIPTS="${HOME}/.hermes/scripts"
 TMUX_SESSION="mem0"
 PORT="8050"
@@ -81,10 +82,17 @@ ok "Cron 脚本已部署到 ${HERMES_SCRIPTS}"
 
 # Cron jobs 需要通过 Hermes 创建 — 如果 hermes 可用则尝试
 if command -v hermes &>/dev/null; then
+    # Note: cronjob flags may differ between Hermes versions.
+    # The cronjob tool uses `--no_agent` (underscore), CLI may use `--no-agent` (dash).
+    # We try the tool-native form first, then fall back to CLI-compatible form.
+    hermes cron create --name mem0-process-watchdog --no_agent --schedule "every 5m" \
+        --script mem0-process-watchdog.sh 2>/dev/null || \
     hermes cron create --name mem0-process-watchdog --no-agent --schedule "every 5m" \
         --script mem0-process-watchdog.sh 2>/dev/null && \
         ok "Cron: mem0-process-watchdog" || \
-        warn "Cron 创建失败（可能已存在），请手动检查"
+        warn "Cron 创建失败（可能已存在），请手动检查: hermes cron create --name mem0-process-watchdog --no-agent --schedule 'every 5m' --script mem0-process-watchdog.sh"
+    hermes cron create --name mem0-blacklist-daily-reset --no_agent --schedule "0 10 * * *" \
+        --script mem0-blacklist-reset.sh 2>/dev/null || \
     hermes cron create --name mem0-blacklist-daily-reset --no-agent --schedule "0 10 * * *" \
         --script mem0-blacklist-reset.sh 2>/dev/null && \
         ok "Cron: mem0-blacklist-daily-reset" || \

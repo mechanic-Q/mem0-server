@@ -1,4 +1,5 @@
 venv/
+venv2/
 models/
 data/
 qdrant-data/
@@ -7,8 +8,12 @@ __pycache__/
 .zhipu_key
 .openrouter_key
 .deepseek_key
+.agnes_key
+.nvidia_key
 .env
 *.bak
 *.bak.*
 # Runtime blacklist — regenerated automatically
 provider_blacklist.json
+.blacklist_markers/
+blacklist_clearance.log

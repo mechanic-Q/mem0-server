@@ -94,7 +94,7 @@ if NVIDIA_KEY:
         })
 
 if not LLM_CHAIN:
-    raise RuntimeError("No LLM API keys found. Add .zhipu_key to ~/.mem0-server/")
+    raise RuntimeError("No LLM API keys found. Add .zhipu_key, .agnes_key, or .nvidia_key to ~/.mem0-server/")
 
 PRIMARY_LLM = LLM_CHAIN[0]
 logger.info("LLM chain: %s", " → ".join(p["name"] for p in LLM_CHAIN))
