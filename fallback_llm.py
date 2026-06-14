@@ -2,8 +2,8 @@
 Fallback LLM provider for mem0 — multi-provider fallback chain.
 
 Inherits OpenAILLM to preserve _parse_response() (tool_calls parsing).
-Switches provider only on rate-limit errors (402/429/quota/capacity).
-Supports persistent blacklist: failed providers are skipped until cleared.
+Switches provider on errors (rate-limit, timeout, connection, etc.).
+Persistent blacklist: 3 consecutive failures → auto-blacklist → skipped until daily reset.
 """
 import json
 import logging
@@ -18,13 +18,18 @@ from mem0.configs.llms.base import BaseLlmConfig
 BLACKLIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "provider_blacklist.json")
 
+# Consecutive failures before auto-blacklisting a provider
+BLACKLIST_THRESHOLD = 3
+
 
 def _load_blacklist():
     """Load blacklist from JSON file. Returns dict {index_str: info_dict}."""
     try:
         if os.path.exists(BLACKLIST_PATH):
             with open(BLACKLIST_PATH, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+                # Filter out pending entries (kept for backward compat)
+                return {k: v for k, v in data.items() if not v.get("_pending")}
     except (json.JSONDecodeError, IOError) as e:
         logger.warning(f"Blacklist load failed, resetting: {e}")
     return {}
@@ -37,6 +42,10 @@ def _save_blacklist(bl):
             json.dump(bl, f, ensure_ascii=False, indent=2)
     except IOError as e:
         logger.warning(f"Blacklist save failed: {e}")
+
+
+# In-memory consecutive failure tracker (resets on restart)
+_failure_counts = {}
 
 
 class FallbackLLMConfig(BaseLlmConfig):
@@ -52,7 +61,12 @@ class FallbackLLM(OpenAILLM):
     OpenAI-compatible fallback chain with multi-provider switching.
 
     Inherits OpenAILLM to inherit its _parse_response() logic (tool_calls,
-    structured output). Only falls back on rate-limit errors.
+    structured output). Falls back on any error, not just rate-limit.
+
+    Blacklist policy:
+    - Quota/billing errors → immediate blacklist
+    - Other errors (timeout, connection, 500, etc.) → blacklist after 3 consecutive failures
+    - Daily reset clears all blacklists
     """
 
     RATE_LIMIT_KEYWORDS = (
@@ -61,7 +75,7 @@ class FallbackLLM(OpenAILLM):
         "500", "502", "503", "504",
     )
 
-    # Keywords that indicate permanent exhaustion (quota/402), not transient
+    # Immediate blacklist (quota exhausted)
     QUOTA_KEYWORDS = ("402", "quota", "insufficient", "billing")
 
     def __init__(self, config):
@@ -98,7 +112,6 @@ class FallbackLLM(OpenAILLM):
                         timeout=20.0,
                     )
                     self.config.model = provider["model"]
-                # Primary (i==0) already has client from __init__; add timeout
                 result = super().generate_response(
                     messages, response_format, tools, tool_choice,
                     timeout=20.0, **kwargs
@@ -110,23 +123,34 @@ class FallbackLLM(OpenAILLM):
                         "returned None, falling back"
                     )
                     last_error = ValueError("Empty response (None)")
+                    self._record_failure(i, provider, str(last_error))
                     continue
+                # Success → reset failure counter
+                _failure_counts[i] = 0
                 return result
+
             except Exception as e:
                 err = str(e).lower()
                 if any(k in err for k in self.RATE_LIMIT_KEYWORDS):
-                    # Check if this is a quota error → add to blacklist
+                    model_name = provider.get("model", "unknown")
+                    reason = str(e)[:200]
+
+                    # Quota errors → immediate blacklist
                     if any(k in err for k in self.QUOTA_KEYWORDS):
-                        model_name = provider.get("model", "unknown")
                         blacklist[str(i)] = {
                             "model": model_name,
-                            "reason": str(e)[:200],
+                            "reason": reason,
                             "blacklisted_at": datetime.now().isoformat(),
                         }
                         _save_blacklist(blacklist)
+                        _failure_counts[i] = 0
                         logger.info(
-                            f"Provider {i} ({model_name}) blacklisted: {str(e)[:100]}"
+                            f"Provider {i} ({model_name}) blacklisted (quota): {reason[:100]}"
                         )
+                    else:
+                        # Other errors → count consecutive failures
+                        self._record_failure(i, provider, reason)
+
                     last_error = e
                     continue
                 raise
@@ -138,3 +162,26 @@ class FallbackLLM(OpenAILLM):
             f"All providers exhausted (blacklisted: {bl_count}/{total})"
         )
         raise last_error or RuntimeError("All providers exhausted")
+
+    def _record_failure(self, i, provider, reason):
+        """Track consecutive failures; blacklist after threshold."""
+        _failure_counts[i] = _failure_counts.get(i, 0) + 1
+        count = _failure_counts[i]
+        model_name = provider.get("model", "unknown")
+
+        if count >= BLACKLIST_THRESHOLD:
+            blacklist = _load_blacklist()
+            blacklist[str(i)] = {
+                "model": model_name,
+                "reason": f"{count} consecutive failures: {reason[:150]}",
+                "blacklisted_at": datetime.now().isoformat(),
+            }
+            _save_blacklist(blacklist)
+            _failure_counts[i] = 0
+            logger.info(
+                f"Provider {i} ({model_name}) blacklisted after {count} consecutive failures: {reason[:100]}"
+            )
+        else:
+            logger.warning(
+                f"Provider {i} ({model_name}) failed ({count}/{BLACKLIST_THRESHOLD}): {reason[:100]}"
+            )

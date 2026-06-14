@@ -44,53 +44,57 @@ def _load_key(filename):
     return ""
 
 
-OPENROUTER_KEY = _load_key(".openrouter_key")
-DEEPSEEK_KEY = _load_key(".deepseek_key")
 ZHIPU_KEY = _load_key(".zhipu_key")
 
 # ---------------------------------------------------------------------------
-# Auto-discover OpenRouter free models
-# ---------------------------------------------------------------------------
-def _discover_openrouter_models(api_key):
-    """Return a fixed list of free models known to work with mem0 extraction."""
-    logger.info("Using fixed OpenRouter free model list (skip probe)")
-    return [
-        "nvidia/nemotron-3-super-120b-a12b:free",
-        "qwen/qwen3-coder:free",
-        "minimax/minimax-m2.5:free",
-        "google/gemma-4-26b-a4b-it:free",
-        "nvidia/nemotron-3-nano-30b-a3b:free",
-        "qwen/qwen3-next-80b-a3b-instruct:free",
-    ]
-
-
-# ---------------------------------------------------------------------------
-# LLM fallback chain
-# ---------------------------------------------------------------------------
+# LLM fallback chain — Zhipu free models only (verified JSON mode support)
+# OpenRouter free models REMOVED: ALL 22 free models lack response_format json_object capability
 LLM_CHAIN = []
-OR_MODELS = []
 
-# Zhipu GLM-4-Flash: free, unlimited — highest priority as safety net
+# Zhipu GLM-4-Flash: free, unlimited — supports JSON mode
 if ZHIPU_KEY:
-    LLM_CHAIN.append({
-        "name": "Zhipu/GLM-4-Flash",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "api_key": ZHIPU_KEY,
-        "model": "glm-4-flash",
-    })
-
-if OPENROUTER_KEY:
-    OR_MODELS = _discover_openrouter_models(OPENROUTER_KEY)
-    for m in OR_MODELS:
+    for model_name, model_id in [
+        ("Zhipu/GLM-4.7-Flash", "glm-4.7-flash"),
+        ("Zhipu/GLM-4.6V-Flash", "glm-4.6v-flash"),
+    ]:
         LLM_CHAIN.append({
-            "name": f"OpenRouter/{m}",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key": OPENROUTER_KEY,
-            "model": m,
+            "name": model_name,
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
+            "api_key": ZHIPU_KEY,
+            "model": model_id,
+        })
+
+# Agnes AI models — supports JSON mode (free, RPM 20)
+AGNES_KEY = _load_key(".agnes_key")
+if AGNES_KEY:
+    for model_name, model_id in [
+        ("Agnes/2.0-Flash", "agnes-2.0-flash"),
+        ("Agnes/1.5-Flash", "agnes-1.5-flash"),
+    ]:
+        LLM_CHAIN.append({
+            "name": model_name,
+            "base_url": "https://apihub.agnes-ai.com/v1",
+            "api_key": AGNES_KEY,
+            "model": model_id,
+        })
+
+# NVIDIA NIM — free tier models (JSON mode verified)
+NVIDIA_KEY = _load_key(".nvidia_key")
+if NVIDIA_KEY:
+    for model_name, model_id in [
+        ("NVIDIA/Llama-3.1-70B", "meta/llama-3.1-70b-instruct"),
+        ("NVIDIA/Qwen3.5-122B", "qwen/qwen3.5-122b-a10b"),
+        ("NVIDIA/Gemma-4-31B", "google/gemma-4-31b-it"),
+    ]:
+        LLM_CHAIN.append({
+            "name": model_name,
+            "base_url": "https://integrate.api.nvidia.com/v1",
+            "api_key": NVIDIA_KEY,
+            "model": model_id,
         })
 
 if not LLM_CHAIN:
-    raise RuntimeError("No LLM API keys found. Add .zhipu_key or .openrouter_key to ~/.mem0-server/")
+    raise RuntimeError("No LLM API keys found. Add .zhipu_key to ~/.mem0-server/")
 
 PRIMARY_LLM = LLM_CHAIN[0]
 logger.info("LLM chain: %s", " → ".join(p["name"] for p in LLM_CHAIN))
@@ -224,7 +228,7 @@ async def get_memories(user_id: str = "hermes-user", agent_id: Optional[str] = N
         if agent_id:
             filters["agent_id"] = agent_id
         result = mem0_client.get_all(filters=filters)
-        return {"results": result}
+        return result
     except Exception as e:
         logger.exception("get_memories failed")
         raise HTTPException(500, str(e))
@@ -238,7 +242,7 @@ async def search_memories(req: SearchRequest):
         if req.agent_id:
             filters["agent_id"] = req.agent_id
         result = mem0_client.search(query=req.query, filters=filters, top_k=req.top_k)
-        return {"results": result}
+        return result
     except Exception as e:
         logger.exception("search_memories failed")
         raise HTTPException(500, str(e))
@@ -263,6 +267,91 @@ async def delete_memory(memory_id: str):
         return {"status": "deleted", "id": memory_id}
     except Exception as e:
         logger.exception("delete_memory failed")
+        raise HTTPException(500, str(e))
+
+
+# ---------------------------------------------------------------------------
+# MemoryClient-compatible endpoints (api.mem0.ai → localhost bridge)
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/ping/")
+async def ping_v1():
+    """MemoryClient init validation — no real auth, just return format."""
+    return {"user_email": "local@mem0-server", "org_id": "local", "project_id": "local"}
+
+
+class V3AddRequest(BaseModel):
+    messages: list[dict] = []
+    user_id: str = "hermes-user"
+    agent_id: str = "hermes"
+    infer: bool = True
+    metadata: Optional[dict] = None
+
+
+class V3GetAllRequest(BaseModel):
+    filters: dict = Field(default_factory=lambda: {"user_id": "hermes-user"})
+    page: Optional[int] = None
+    page_size: Optional[int] = None
+
+
+class V3SearchRequest(BaseModel):
+    query: str
+    filters: dict = Field(default_factory=lambda: {"user_id": "hermes-user"})
+    top_k: int = 10
+    rerank: bool = True
+
+
+@app.post("/v3/memories/add/")
+async def add_v3(req: V3AddRequest):
+    """MemoryClient.add → same as /v1/memories."""
+    try:
+        if not req.messages:
+            raise HTTPException(400, "Provide 'messages'")
+        result = mem0_client.add(
+            messages=req.messages,
+            user_id=req.user_id,
+            agent_id=req.agent_id,
+            infer=req.infer,
+            metadata=req.metadata,
+        )
+        logger.info("V3 add result: %s", result)
+        if isinstance(result, dict):
+            return result
+        return {"results": result}
+    except Exception as e:
+        logger.exception("add_v3 failed")
+        raise HTTPException(500, str(e))
+
+
+@app.post("/v3/memories/")
+async def get_all_v3(req: V3GetAllRequest):
+    """MemoryClient.get_all — extracts filters from body."""
+    try:
+        user_id = req.filters.get("user_id", "hermes-user")
+        agent_id = req.filters.get("agent_id")
+        f = {"user_id": user_id}
+        if agent_id:
+            f["agent_id"] = agent_id
+        result = mem0_client.get_all(filters=f)
+        return result
+    except Exception as e:
+        logger.exception("get_all_v3 failed")
+        raise HTTPException(500, str(e))
+
+
+@app.post("/v3/memories/search/")
+async def search_v3(req: V3SearchRequest):
+    """MemoryClient.search — extracts filters, translates to flat params."""
+    try:
+        user_id = req.filters.get("user_id", "hermes-user")
+        agent_id = req.filters.get("agent_id")
+        f = {"user_id": user_id}
+        if agent_id:
+            f["agent_id"] = agent_id
+        result = mem0_client.search(query=req.query, filters=f, top_k=req.top_k)
+        return result
+    except Exception as e:
+        logger.exception("search_v3 failed")
         raise HTTPException(500, str(e))
 
 
