@@ -1,0 +1,12 @@
+# Hermes config.yaml 的 memory: 段（key 字段检查用）
+# restore.sh 第 4.6 步: 是会取这个 snippet 写入 ~/.hermes/config.yaml 中对应段位
+# 不会写任何 api_key/host—仅当行本身缺失时补上下面的最小骨架
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  provider: mem0
+  flush_min_turns: 6
+  nudge_interval: 10
+  base_url: http://localhost:8050
