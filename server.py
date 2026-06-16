@@ -307,6 +307,9 @@ async def add_v3(req: V3AddRequest):
     try:
         if not req.messages:
             raise HTTPException(400, "Provide 'messages'")
+        logger.info("[ADD_V3 REQUEST] messages=%s user_id=%s agent_id=%s infer=%s",
+            json.dumps(req.messages, ensure_ascii=False)[:500],
+            req.user_id, req.agent_id, req.infer)
         result = mem0_client.add(
             messages=req.messages,
             user_id=req.user_id,
@@ -314,12 +317,13 @@ async def add_v3(req: V3AddRequest):
             infer=req.infer,
             metadata=req.metadata,
         )
-        logger.info("V3 add result: %s", result)
+        logger.info("[ADD_V3 RESULT] type=%s value=%s",
+            type(result).__name__, json.dumps(result, ensure_ascii=False)[:800])
         if isinstance(result, dict):
             return result
         return {"results": result}
     except Exception as e:
-        logger.exception("add_v3 failed")
+        logger.exception("[ADD_V3 FAILED] %s", e)
         raise HTTPException(500, str(e))
 
 
@@ -348,10 +352,14 @@ async def search_v3(req: V3SearchRequest):
         f = {"user_id": user_id}
         if agent_id:
             f["agent_id"] = agent_id
+        logger.debug("[SEARCH_V3] query=%s filters=%s top_k=%s rerank=%s",
+            req.query[:80], json.dumps(f), req.top_k, req.rerank)
         result = mem0_client.search(query=req.query, filters=f, top_k=req.top_k)
+        logger.debug("[SEARCH_V3 RESULT] results=%d", 
+            len(result.get("results", result) if isinstance(result, dict) else result))
         return result
     except Exception as e:
-        logger.exception("search_v3 failed")
+        logger.exception("[SEARCH_V3 FAILED] %s", e)
         raise HTTPException(500, str(e))
 
 
