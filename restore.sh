@@ -247,11 +247,13 @@ else
     sleep 1
     if ! curl -s --max-time 3 "http://localhost:${QDRANT_PORT}/collections" > /dev/null 2>&1; then
       warn "Qdrant 未运行，尝试启动..."
-      bash -c "qdrant --path ${MEM0_HOME}/data >/dev/null 2>&1" &
-      sleep 2
+      cd "$MEM0_HOME/data" && nohup qdrant >/dev/null 2>&1 &
+      sleep 3
     fi
-    tmux new-session -d -s "$TMUX_SESSION" \
-      "cd ${MEM0_HOME} && source ${VENV_DIR}/bin/activate && python3 server.py"
+    tmux new-session -d -s "$TMUX_SESSION" -n mem0 \
+      "cd ${MEM0_HOME}/data && qdrant" \; \
+      split-window -v \; \
+      "cd ${MEM0_HOME} && ${VENV_DIR}/bin/python server.py"
     sleep 4
     ok "mem0-server 已启动"
   fi
