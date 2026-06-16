@@ -299,6 +299,33 @@ else
   fail "mem0-server 健康检查失败 (port ${PORT})"
 fi
 
+# ── 7/10: 安装定时任务(cron) ──
+step 7 "安装定时任务"
+CRON_FILE=$(mktemp)
+crontab -l > "$CRON_FILE" 2>/dev/null || true
+CRON_MARKER="# === mem0-server auto-tasks ==="
+
+if grep -q "$CRON_MARKER" "$CRON_FILE" 2>/dev/null; then
+  ok "cron 任务已存在，跳过"
+else
+  if [ $DRY_RUN -eq 1 ]; then
+    echo "  [dry-run] 添加 cron 任务:"
+    echo "    */5 * * * * $MEM0_HOME/health-check.sh"
+    echo "    0 */6 * * * $MEM0_HOME/backup.sh"
+  else
+    cat >> "$CRON_FILE" << EOF
+$CRON_MARKER
+# mem0-server 健康检查 — 宕机自动重启（每 5 分钟）
+*/5 * * * * $MEM0_HOME/health-check.sh
+# mem0-server 数据备份 — 保留最多 7 份（每 6 小时）
+0 */6 * * * $MEM0_HOME/backup.sh
+EOF
+    crontab "$CRON_FILE"
+    ok "cron 任务已安装（健康检查每 5 分钟，备份每 6 小时）"
+  fi
+fi
+rm -f "$CRON_FILE"
+
 echo
 echo "============================================"
 echo " 还原完成 ✅"
