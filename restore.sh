@@ -207,6 +207,34 @@ else
   warn "mem0 插件不存在: $MEM0_PLUGIN"
 fi
 
+# ── 4.8/10: Hermes 端 mem0 插件 host 转发补丁 ──
+step 4.8 "Hermes 端 mem0 插件 host 转发补丁"
+MEM0_PLUGIN="${HERMES_DIR}/hermes-agent/plugins/memory/mem0/__init__.py"
+PATCH_FILE="${MEM0_HOME}/patches/0003-hermes-plugin-pass-host-to-MemoryClient.patch"
+if [ -f "$MEM0_PLUGIN" ] && grep -q 'kwargs\["host"\]' "$MEM0_PLUGIN" 2>/dev/null; then
+  ok "host 转发补丁已应用，跳过"
+elif [ -f "$MEM0_PLUGIN" ] && [ -f "$PATCH_FILE" ]; then
+  if [ $DRY_RUN -eq 1 ]; then
+    echo "  [dry-run] patch -d \"${HERMES_DIR}/hermes-agent\" -p1 < \"$PATCH_FILE\""
+  else
+    if patch -d "${HERMES_DIR}/hermes-agent" -p1 --no-backup-if-mismatch < "$PATCH_FILE" 2>/dev/null; then
+      ok "Hermes mem0 插件 host 转发补丁已应用"
+      # 验证
+      if grep -q 'kwargs\["host"\]' "$MEM0_PLUGIN" 2>/dev/null; then
+        ok "验证通过: kwargs[\"host\"] 已存在"
+      else
+        warn "补丁应用后验证失败 — 请手动检查 $PATCH_FILE"
+      fi
+    else
+      warn "补丁应用失败 — 手动执行: patch -d \"${HERMES_DIR}/hermes-agent\" -p1 < \"$PATCH_FILE\""
+    fi
+  fi
+elif [ -f "$MEM0_PLUGIN" ]; then
+  warn "补丁文件不存在: $PATCH_FILE — 请确保仓库已更新"
+else
+  warn "mem0 插件不存在: $MEM0_PLUGIN — 跳过"
+fi
+
 # ── 5/10: 启动 mem0-server ──
 step 5 "启动 mem0-server"
 if curl -s --max-time 3 "http://localhost:${PORT}/v1/health" > /dev/null 2>&1; then
