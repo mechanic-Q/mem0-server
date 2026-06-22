@@ -148,24 +148,45 @@ ok "Cron 脚本已部署到 ${HERMES_SCRIPTS}"
 step 4.5 "~/.hermes/mem0.json 检查与修复"
 MEM0_JSON="${HERMES_DIR}/mem0.json"
 MEM0_JSON_TPL="${MEM0_HOME}/scripts/templates/hermes_config/mem0.json.tpl"
-if [ -f "$MEM0_JSON" ] && grep -q '"host"' "$MEM0_JSON"; then
-  ok "mem0.json 已存在且含 host 字段"
+if [ -f "$MEM0_JSON" ] && grep -q '"host"' "$MEM0_JSON" && grep -q '"mode"' "$MEM0_JSON"; then
+  ok "mem0.json 已存在且含 host + mode 字段"
+elif [ -f "$MEM0_JSON" ] && grep -q '"host"' "$MEM0_JSON"; then
+  # 旧 mem0.json 只有 host 字段（2026-06-23 Hermes 升级前的版本）
+  # 新插件 (PlatformBackend/OSSBackend 架构) 默认 mode=platform 会忽略 host 走云端
+  # 需要补一个 "mode": "http" 字段才能让新插件走 HTTPBackend → 本地 server
+  warn "mem0.json 缺 mode 字段 — 新版 Hermes 插件会忽略 host 走云端"
+  if [ $DRY_RUN -eq 1 ]; then
+    echo "  [dry-run] 在 mem0.json 头部插入 \"mode\": \"http\""
+  else
+    # 用 python 安全地合并 JSON（避免破坏既有字段）
+    python3 -c "
+import json, pathlib
+p = pathlib.Path('$MEM0_JSON')
+d = json.loads(p.read_text())
+if 'mode' not in d: d['mode'] = 'http'
+if 'host' not in d: d['host'] = 'http://127.0.0.1:8050'
+p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + '\\n')
+"
+    chmod 600 "$MEM0_JSON"
+    ok "已补 mode=http 到现有 mem0.json"
+  fi
 else
+  # mem0.json 不存在，全新部署
   if [ -f "$MEM0_JSON_TPL" ]; then
     if [ $DRY_RUN -eq 1 ]; then
       echo "  [dry-run] cp $MEM0_JSON_TPL $MEM0_JSON"
     else
       cp "$MEM0_JSON_TPL" "$MEM0_JSON"
       chmod 600 "$MEM0_JSON"
-      ok "已从 template 部署 mem0.json"
+      ok "已从 template 部署 mem0.json (含 mode=http)"
     fi
   else
-    # fallback: 手动写
+    # fallback: 手动写（含 mode 字段，匹配 0004 补丁要求）
     if [ $DRY_RUN -eq 0 ]; then
       mkdir -p "$HERMES_DIR"
-      echo '{"host":"http://127.0.0.1:8050"}' > "$MEM0_JSON"
+      echo '{"mode":"http","host":"http://127.0.0.1:8050","user_id":"hermes-user","agent_id":"hermes"}' > "$MEM0_JSON"
       chmod 600 "$MEM0_JSON"
-      ok "已手动创建 mem0.json"
+      ok "已手动创建 mem0.json (含 mode=http)"
     fi
   fi
 fi
@@ -193,47 +214,94 @@ fi
 # ── 4.7/10: Hermes 端 mem0 插件代码完整性 ──
 step 4.7 "Hermes 端 mem0 插件代码完整性"
 MEM0_PLUGIN="${HERMES_DIR}/hermes-agent/plugins/memory/mem0/__init__.py"
+MEM0_BACKEND="${HERMES_DIR}/hermes-agent/plugins/memory/mem0/_backend.py"
 if [ -f "$MEM0_PLUGIN" ]; then
-  MISSING_FUNCS=""
-  for fn in _get_client sync_turn handle_tool_call; do
-    grep -q "def $fn" "$MEM0_PLUGIN" 2>/dev/null || MISSING_FUNCS="${MISSING_FUNCS} ${fn}"
-  done
-  if [ -z "$MISSING_FUNCS" ]; then
-    ok "mem0 插件完整 (_get_client, sync_turn, handle_tool_call 均在)"
+  # 通过文件存在性判断新旧版本架构
+  # 旧版 (2026-06-23 升级前)：单一 __init__.py，含 _get_client / sync_turn / handle_tool_call
+  # 新版 (2026-06-23 升级后)：__init__.py + _backend.py + _oss_providers.py 多模块，含 _create_backend / Mem0Backend 抽象类
+  if [ -f "$MEM0_BACKEND" ]; then
+    PLUGIN_ARCH="new"
+    MISSING_FUNCS=""
+    for fn in _create_backend sync_turn handle_tool_call; do
+      grep -q "def $fn" "$MEM0_PLUGIN" 2>/dev/null || MISSING_FUNCS="${MISSING_FUNCS} ${fn}"
+    done
+    grep -q "class Mem0Backend" "$MEM0_BACKEND" 2>/dev/null || MISSING_FUNCS="${MISSING_FUNCS} Mem0Backend(in _backend.py)"
+    if [ -z "$MISSING_FUNCS" ]; then
+      ok "mem0 插件完整 (新版架构 — _create_backend, Mem0Backend ABC 均在)"
+    else
+      warn "mem0 插件缺少:${MISSING_FUNCS} — 请手动修复 Hermes 端代码"
+    fi
   else
-    warn "mem0 插件缺少函数:${MISSING_FUNCS} — 请手动修复 Hermes 端代码"
+    PLUGIN_ARCH="old"
+    MISSING_FUNCS=""
+    for fn in _get_client sync_turn handle_tool_call; do
+      grep -q "def $fn" "$MEM0_PLUGIN" 2>/dev/null || MISSING_FUNCS="${MISSING_FUNCS} ${fn}"
+    done
+    if [ -z "$MISSING_FUNCS" ]; then
+      ok "mem0 插件完整 (旧版架构 — _get_client, sync_turn, handle_tool_call 均在)"
+    else
+      warn "mem0 插件缺少函数:${MISSING_FUNCS} — 请手动修复 Hermes 端代码"
+    fi
   fi
 else
+  PLUGIN_ARCH="missing"
   warn "mem0 插件不存在: $MEM0_PLUGIN"
 fi
 
-# ── 4.8/10: Hermes 端 mem0 插件 host 转发补丁 ──
-step 4.8 "Hermes 端 mem0 插件 host 转发补丁"
-MEM0_PLUGIN="${HERMES_DIR}/hermes-agent/plugins/memory/mem0/__init__.py"
-PATCH_FILE="${MEM0_HOME}/patches/0003-hermes-plugin-pass-host-to-MemoryClient.patch"
-if [ -f "$MEM0_PLUGIN" ] && grep -q 'kwargs\["host"\]' "$MEM0_PLUGIN" 2>/dev/null; then
-  ok "host 转发补丁已应用，跳过"
-elif [ -f "$MEM0_PLUGIN" ] && [ -f "$PATCH_FILE" ]; then
-  if [ $DRY_RUN -eq 1 ]; then
-    echo "  [dry-run] patch -d \"${HERMES_DIR}/hermes-agent\" -p1 < \"$PATCH_FILE\""
-  else
-    if patch -d "${HERMES_DIR}/hermes-agent" -p1 --no-backup-if-mismatch < "$PATCH_FILE" 2>/dev/null; then
-      ok "Hermes mem0 插件 host 转发补丁已应用"
-      # 验证
-      if grep -q 'kwargs\["host"\]' "$MEM0_PLUGIN" 2>/dev/null; then
-        ok "验证通过: kwargs[\"host\"] 已存在"
-      else
-        warn "补丁应用后验证失败 — 请手动检查 $PATCH_FILE"
-      fi
-    else
-      warn "补丁应用失败 — 手动执行: patch -d \"${HERMES_DIR}/hermes-agent\" -p1 < \"$PATCH_FILE\""
-    fi
+# ── 4.8/10: Hermes 端 mem0 插件本地化补丁 ──
+step 4.8 "Hermes 端 mem0 插件本地化补丁"
+# 根据 4.7 检测出的插件架构，自动选择对应的补丁：
+#   新版 (PLUGIN_ARCH=new) → 0004：给新插件添加 HTTPBackend 类
+#   旧版 (PLUGIN_ARCH=old) → 0003：给旧插件的 MemoryClient(...) 调用注入 host 参数
+PATCH_0003="${MEM0_HOME}/patches/0003-hermes-plugin-pass-host-to-MemoryClient.patch"
+PATCH_0004="${MEM0_HOME}/patches/0004-hermes-plugin-add-http-backend.patch"
+
+apply_patch() {
+  local patch_file="$1"
+  local verify_pattern="$2"  # 用来判断"是否已应用"的特征字符串
+  local verify_file="$3"
+  local label="$4"
+
+  if [ ! -f "$patch_file" ]; then
+    warn "补丁文件不存在: $patch_file — 请确保仓库已更新"
+    return 1
   fi
-elif [ -f "$MEM0_PLUGIN" ]; then
-  warn "补丁文件不存在: $PATCH_FILE — 请确保仓库已更新"
-else
-  warn "mem0 插件不存在: $MEM0_PLUGIN — 跳过"
-fi
+
+  # 幂等检查：补丁特征已存在则跳过
+  if [ -f "$verify_file" ] && grep -q "$verify_pattern" "$verify_file" 2>/dev/null; then
+    ok "${label} 已应用，跳过"
+    return 0
+  fi
+
+  if [ $DRY_RUN -eq 1 ]; then
+    echo "  [dry-run] patch -d \"${HERMES_DIR}/hermes-agent\" -p1 < \"$patch_file\""
+    return 0
+  fi
+
+  if patch -d "${HERMES_DIR}/hermes-agent" -p1 --no-backup-if-mismatch < "$patch_file" 2>/dev/null; then
+    if grep -q "$verify_pattern" "$verify_file" 2>/dev/null; then
+      ok "${label} 已应用并通过特征验证"
+    else
+      warn "${label} 应用后特征验证失败 — 请手动检查 $patch_file"
+    fi
+  else
+    warn "${label} 应用失败 — 手动执行: patch -d \"${HERMES_DIR}/hermes-agent\" -p1 < \"$patch_file\""
+  fi
+}
+
+case "${PLUGIN_ARCH:-missing}" in
+  new)
+    # 新版：检查 _backend.py 里是否已有 HTTPBackend 类
+    apply_patch "$PATCH_0004" "class HTTPBackend" "$MEM0_BACKEND" "0004 HTTPBackend 补丁（新版插件）"
+    ;;
+  old)
+    # 旧版：检查 __init__.py 里是否已有 kwargs["host"] 注入
+    apply_patch "$PATCH_0003" 'kwargs\["host"\]' "$MEM0_PLUGIN" "0003 host 转发补丁（旧版插件）"
+    ;;
+  missing|*)
+    warn "mem0 插件不存在 — 跳过补丁应用"
+    ;;
+esac
 
 # ── 5/10: 启动 mem0-server ──
 step 5 "启动 mem0-server"

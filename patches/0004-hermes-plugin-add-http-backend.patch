@@ -1,0 +1,147 @@
+# 0004 — 为 Hermes 升级后的新插件架构添加 HTTPBackend 类，让 mem0 流量重新走本地 mem0-server (127.0.0.1:8050)
+# 适用于 2026-06-23 01:30 之后的 Hermes 版本（新插件已重写为 PlatformBackend/OSSBackend 双 backend 架构）
+# 旧版本插件请改用 0003 补丁
+#
+--- a/plugins/memory/mem0/_backend.py
++++ b/plugins/memory/mem0/_backend.py
+@@ -241,3 +241,118 @@
+                 client.close()
+         except Exception:
+             pass
++
++
++class HTTPBackend(Mem0Backend):
++    """Wraps a mechanic-Q/mem0-server FastAPI instance via its v3 + v1 endpoints.
++
++    Routes:
++      - search   -> POST /v3/memories/search/      (filters dict + top_k + rerank)
++      - get_all  -> POST /v3/memories/             (filters dict + page/page_size)
++      - add      -> POST /v3/memories/add/         (messages + user_id + agent_id + infer)
++      - update   -> PUT  /v1/memories/{memory_id}  (data field — v3 has no update)
++      - delete   -> DELETE /v1/memories/{memory_id}
++
++    Used when ~/.hermes/mem0.json has {"mode": "http", "host": "..."}.
++    Keeps the user's self-hosted server (KaLM embedder + 7-LLM fallback chain + Qdrant)
++    on the data path without forcing the new OSS providers (openai/ollama only).
++    """
++
++    def __init__(self, host: str, timeout: float = 30.0):
++        self._host = host.rstrip("/")
++        self._timeout = timeout
++
++    def _request(self, method: str, path: str, payload: dict | None = None) -> Any:
++        import json
++        import urllib.request
++        import urllib.error
++
++        url = f"{self._host}{path}"
++        data = None
++        headers = {"Content-Type": "application/json"}
++
++        if payload is not None:
++            data = json.dumps(payload).encode("utf-8")
++
++        req = urllib.request.Request(url, data=data, headers=headers, method=method)
++
++        try:
++            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
++                body = resp.read().decode("utf-8")
++        except urllib.error.HTTPError as e:
++            detail = ""
++            try:
++                detail = e.read().decode("utf-8", errors="replace")
++            except Exception:
++                pass
++            raise RuntimeError(
++                f"mem0-server HTTP {e.code} on {method} {path}: {detail or e.reason}"
++            ) from e
++        except urllib.error.URLError as e:
++            raise RuntimeError(
++                f"mem0-server unreachable at {self._host} ({method} {path}): {e.reason}"
++            ) from e
++
++        if not body:
++            return {}
++        return json.loads(body)
++
++    def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = True) -> list[dict]:
++        payload = {
++            "query": query,
++            "filters": filters or {"user_id": "hermes-user"},
++            "top_k": top_k,
++            "rerank": rerank,
++        }
++        response = self._request("POST", "/v3/memories/search/", payload)
++        return _unwrap_results(response)
++
++    def get_all(self, *, filters: dict, page: int = 1, page_size: int = 100) -> dict:
++        payload = {
++            "filters": filters or {"user_id": "hermes-user"},
++            "page": page,
++            "page_size": page_size,
++        }
++        response = self._request("POST", "/v3/memories/", payload)
++
++        if isinstance(response, dict):
++            results = response.get("results", [])
++        else:
++            results = response if isinstance(response, list) else []
++
++        # /v3/memories/ ignores page/page_size server-side; slice locally to honor pagination.
++        total = response.get("count", len(results)) if isinstance(response, dict) else len(results)
++        if isinstance(results, list) and page_size and page:
++            start = (page - 1) * page_size
++            results = results[start : start + page_size]
++
++        return {"results": results, "count": total}
++
++    def add(
++        self,
++        messages: list,
++        *,
++        user_id: str,
++        agent_id: str,
++        infer: bool = False,
++        metadata: dict | None = None,
++    ) -> dict:
++        payload: dict[str, Any] = {
++            "messages": messages,
++            "user_id": user_id,
++            "agent_id": agent_id,
++            "infer": infer,
++        }
++        if metadata:
++            payload["metadata"] = metadata
++        return self._request("POST", "/v3/memories/add/", payload)
++
++    def update(self, memory_id: str, text: str) -> dict:
++        # v1 /memories/{id} uses {"memory_id", "data"} per UpdateRequest pydantic model.
++        payload = {"memory_id": memory_id, "data": text}
++        response = self._request("PUT", f"/v1/memories/{memory_id}", payload)
++        return {"result": "Memory updated.", "memory_id": memory_id, "raw": response}
++
++    def delete(self, memory_id: str) -> dict:
++        response = self._request("DELETE", f"/v1/memories/{memory_id}")
++        return {"result": "Memory deleted.", "memory_id": memory_id, "raw": response}
+--- a/plugins/memory/mem0/__init__.py
++++ b/plugins/memory/mem0/__init__.py
+@@ -217,6 +217,8 @@
+         mode = cfg.get("mode", "platform")
+         if mode == "oss":
+             return bool(cfg.get("oss", {}).get("vector_store"))
++        if mode == "http":
++            return bool(cfg.get("host"))
+         return bool(cfg.get("api_key"))
+ 
+     def save_config(self, values, hermes_home):
+@@ -251,6 +253,10 @@
+ 
+     def _create_backend(self):
+         try:
++            if self._mode == "http":
++                from ._backend import HTTPBackend
++                host = self._config.get("host", "http://127.0.0.1:8050")
++                return HTTPBackend(host)
+             if self._mode == "oss":
+                 from ._backend import OSSBackend
+                 return OSSBackend(self._config.get("oss", {}))
