@@ -4,6 +4,13 @@ Fallback LLM provider for mem0 — multi-provider fallback chain.
 Inherits OpenAILLM to preserve _parse_response() (tool_calls parsing).
 Switches provider on errors (rate-limit, timeout, connection, etc.).
 Persistent blacklist: 3 consecutive failures → auto-blacklist → skipped until daily reset.
+
+历史沿革（原 patches/0002 描述，于 2026-06-23 合并至此 docstring 并删除孤儿 patch）：
+- 2026-05-08 加入 None response guard（free 模型偶尔返回 content: null）
+- 2026-05-08 加入 persistent provider blacklist（provider_blacklist.json）
+- 2026-05-08 配额错误（402/quota/insufficient/billing）自动加黑
+- 2026-05-08 已加黑的 provider 直接跳过，不再消耗 timeout
+本文件是仓库自有源文件，不存在被外部覆盖的风险；不再需要 patch 形式维护。
 """
 import json
 import logging

@@ -41,8 +41,17 @@ case "${1:-start}" in
         tmux split-window -v -t "$SESSION_NAME"
         tmux send-keys -t "$SESSION_NAME" "cd '$SERVER_DIR' && '$VENV_PYTHON' '$SERVER_SCRIPT'" Enter
 
-        sleep 4
-        if health_check_qdrant && health_check_mem0; then
+        # 轮询健康检查最多 30 秒
+        echo "   Waiting for services (30s timeout)..."
+        _started=false
+        for i in $(seq 1 15); do
+            sleep 2
+            if health_check_qdrant && health_check_mem0; then
+                _started=true
+                break
+            fi
+        done
+        if $_started; then
             echo "✅ mem0-stack started"
             echo "   Qdrant:   port $QDRANT_PORT"
             echo "   mem0:     port $MEM0_PORT"
@@ -50,7 +59,7 @@ case "${1:-start}" in
             echo "   Logs:     tail -f $LOG_FILE"
             exit 0
         else
-            echo "❌ mem0-stack failed to start."
+            echo "❌ mem0-stack failed to start (timeout 30s)."
             health_check_qdrant || echo "   ⚠️  Qdrant not responding"
             health_check_mem0 || echo "   ⚠️  mem0-server not responding"
             echo "   Check tmux: tmux attach -t $SESSION_NAME"
