@@ -16,5 +16,8 @@ __pycache__/
 # Runtime blacklist — regenerated automatically
 provider_blacklist.json
 .blacklist_markers/
-blacklist_clearance.logserver.log
+blacklist_clearance.log
+server.log
+embeddings-server.log
+health-check.log
 *.gz
