@@ -9,6 +9,7 @@ API: mem0-compatible HTTP for Hermes, OpenCode, and any agent.
 import os
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -32,6 +33,15 @@ SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("mem0-server")
+
+# 文件日志：覆盖 root logger，让 server.py 自己的 logger、mem0、httpx、uvicorn 都落盘
+# RotatingFileHandler 限制单文件 10MB × 5 份，避免 server.log 无限增长
+_LOG_FILE = os.path.join(SERVER_DIR, "server.log")
+_file_handler = RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+_file_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_file_handler)
+logger.info("File log handler attached -> %s (rotate 10MB x 5)", _LOG_FILE)
 
 # ---------------------------------------------------------------------------
 # Load API keys
