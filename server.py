@@ -7,13 +7,11 @@ API: mem0-compatible HTTP for Hermes, OpenCode, and any agent.
 """
 
 import os
-import json
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from mem0 import Memory
 
@@ -21,7 +19,8 @@ from mem0 import Memory
 # Config
 # ---------------------------------------------------------------------------
 MEM0_PORT = int(os.environ.get("MEM0_PORT", "8050"))
-QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
+MEM0_HOST = os.environ.get("MEM0_HOST", "127.0.0.1")
+QDRANT_HOST = os.environ.get("QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT = int(os.environ.get("QDRANT_PORT", "6333"))
 COLLECTION_NAME = os.environ.get("MEM0_COLLECTION", "mem0_shared")
 
@@ -41,6 +40,9 @@ _file_handler = RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backup
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
 _file_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(_file_handler)
+# mem0ai emits memory text at INFO during updates. Keep warnings/errors without
+# persisting users' memory contents to server.log.
+logging.getLogger("mem0").setLevel(logging.WARNING)
 logger.info("File log handler attached -> %s (rotate 10MB x 5)", _LOG_FILE)
 
 # ---------------------------------------------------------------------------
@@ -162,7 +164,6 @@ logger.info("LLM chain: %s", " → ".join(p["name"] for p in LLM_CHAIN))
 # FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(title="mem0 self-hosted (mem0ai SDK + KaLM)", version="5.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 class AddRequest(BaseModel):
@@ -184,6 +185,10 @@ class SearchRequest(BaseModel):
 class UpdateRequest(BaseModel):
     memory_id: str
     data: str
+
+
+class StockUpdateRequest(BaseModel):
+    text: str
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +225,6 @@ async def add_memory(req: AddRequest):
             kwargs["metadata"] = req.metadata
 
         result = mem0_client.add(**kwargs)
-        logger.info("Memory add result: %s", result)
         if isinstance(result, dict):
             return result
         return {"results": result}
@@ -269,9 +273,21 @@ async def update_memory(memory_id: str, req: UpdateRequest):
         raise HTTPException(500, str(e))
 
 
+@app.put("/memories/{memory_id}")
+async def update_memory_stock(memory_id: str, req: StockUpdateRequest):
+    """Translate Hermes' stock update body to the existing Mem0 SDK call."""
+    try:
+        result = mem0_client.update(memory_id=memory_id, data=req.text)
+        return {"results": result}
+    except Exception as e:
+        logger.exception("update_memory_stock failed")
+        raise HTTPException(500, str(e))
+
+
 @app.delete("/v1/memories/{memory_id}")
+@app.delete("/memories/{memory_id}")
 async def delete_memory(memory_id: str):
-    """Delete a memory by ID."""
+    """Delete a memory by ID for legacy and stock Hermes clients."""
     try:
         mem0_client.delete(memory_id=memory_id)
         return {"status": "deleted", "id": memory_id}
@@ -281,7 +297,7 @@ async def delete_memory(memory_id: str):
 
 
 # ---------------------------------------------------------------------------
-# MemoryClient-compatible endpoints (api.mem0.ai → localhost bridge)
+# Legacy MemoryClient-compatible endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/v1/ping/")
@@ -312,14 +328,12 @@ class V3SearchRequest(BaseModel):
 
 
 @app.post("/v3/memories/add/")
+@app.post("/memories")
 async def add_v3(req: V3AddRequest):
-    """MemoryClient.add → same as /v1/memories."""
+    """Store memories for MemoryClient and Hermes' stock self-hosted backend."""
     try:
         if not req.messages:
             raise HTTPException(400, "Provide 'messages'")
-        logger.info("[ADD_V3 REQUEST] messages=%s user_id=%s agent_id=%s infer=%s",
-            json.dumps(req.messages, ensure_ascii=False)[:500],
-            req.user_id, req.agent_id, req.infer)
         result = mem0_client.add(
             messages=req.messages,
             user_id=req.user_id,
@@ -327,8 +341,6 @@ async def add_v3(req: V3AddRequest):
             infer=req.infer,
             metadata=req.metadata,
         )
-        logger.info("[ADD_V3 RESULT] type=%s value=%s",
-            type(result).__name__, json.dumps(result, ensure_ascii=False)[:800])
         if isinstance(result, dict):
             return result
         return {"results": result}
@@ -354,16 +366,15 @@ async def get_all_v3(req: V3GetAllRequest):
 
 
 @app.post("/v3/memories/search/")
+@app.post("/search")
 async def search_v3(req: V3SearchRequest):
-    """MemoryClient.search — extracts filters, translates to flat params."""
+    """Search memories for MemoryClient and Hermes' stock self-hosted backend."""
     try:
         user_id = req.filters.get("user_id", "hermes-user")
         agent_id = req.filters.get("agent_id")
         f = {"user_id": user_id}
         if agent_id:
             f["agent_id"] = agent_id
-        logger.debug("[SEARCH_V3] query=%s filters=%s top_k=%s rerank=%s",
-            req.query[:80], json.dumps(f), req.top_k, req.rerank)
         result = mem0_client.search(query=req.query, filters=f, top_k=req.top_k)
         logger.debug("[SEARCH_V3 RESULT] results=%d", 
             len(result.get("results", result) if isinstance(result, dict) else result))
@@ -379,4 +390,4 @@ async def search_v3(req: V3SearchRequest):
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting mem0 server v5.0 on port %d", MEM0_PORT)
-    uvicorn.run(app, host="0.0.0.0", port=MEM0_PORT, log_level="info")
+    uvicorn.run(app, host=MEM0_HOST, port=MEM0_PORT, log_level="info")

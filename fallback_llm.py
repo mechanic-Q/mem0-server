@@ -105,6 +105,8 @@ class FallbackLLM(OpenAILLM):
                           tools=None, tool_choice="auto", **kwargs):
         last_error = None
         blacklist = _load_blacklist()
+        attempted = 0
+        all_null = True
 
         for i, provider in enumerate(self._providers):
             # Skip blacklisted providers
@@ -112,6 +114,7 @@ class FallbackLLM(OpenAILLM):
                 continue
 
             try:
+                attempted += 1
                 if i > 0:
                     self.client = OpenAI(
                         api_key=provider["api_key"],
@@ -137,6 +140,7 @@ class FallbackLLM(OpenAILLM):
                 return result
 
             except Exception as e:
+                all_null = False
                 err = str(e).lower()
                 if any(k in err for k in self.RATE_LIMIT_KEYWORDS):
                     model_name = provider.get("model", "unknown")
@@ -168,6 +172,8 @@ class FallbackLLM(OpenAILLM):
         logger.error(
             f"All providers exhausted (blacklisted: {bl_count}/{total})"
         )
+        if attempted and all_null and response_format == {"type": "json_object"}:
+            return '{"memory": []}'
         raise last_error or RuntimeError("All providers exhausted")
 
     def _record_failure(self, i, provider, reason):

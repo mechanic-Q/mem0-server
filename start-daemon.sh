@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SESSION_NAME="mem0"
+SESSION_NAME="${MEM0_SESSION_NAME:-mem0}"
 MEM0_PORT="${MEM0_PORT:-8050}"
 QDRANT_PORT="${QDRANT_PORT:-6333}"
 SERVER_DIR="$SCRIPT_DIR"
@@ -15,12 +15,27 @@ VENV_PYTHON="$SERVER_DIR/venv/bin/python"
 SERVER_SCRIPT="$SERVER_DIR/server.py"
 QDRANT_BIN="$HOME/.local/bin/qdrant"
 LOG_FILE="$SERVER_DIR/server.log"
+LOCK_FILE="$SERVER_DIR/.data-operation.lock"
+
+if [[ "${1:-start}" != "status" && "${MEM0_DATA_LOCK_HELD:-0}" != "1" ]]; then
+    command -v flock >/dev/null 2>&1 || { echo "Missing command: flock" >&2; exit 1; }
+    exec 9>"$LOCK_FILE"
+    if [[ -n "${MEM0_DATA_LOCK_TIMEOUT:-}" ]]; then
+        flock -x -w "$MEM0_DATA_LOCK_TIMEOUT" 9 || {
+            echo "Timed out waiting for the mem0 data-operation lock." >&2
+            exit 75
+        }
+    else
+        flock -x 9
+    fi
+    export MEM0_DATA_LOCK_HELD=1
+fi
 
 health_check_mem0() {
-    curl -sf "http://localhost:$MEM0_PORT/v1/ping/" >/dev/null 2>&1
+    curl -sf "http://127.0.0.1:$MEM0_PORT/v1/ping/" >/dev/null 2>&1
 }
 health_check_qdrant() {
-    curl -sf "http://localhost:$QDRANT_PORT/collections" >/dev/null 2>&1
+    curl -sf "http://127.0.0.1:$QDRANT_PORT/collections" >/dev/null 2>&1
 }
 
 case "${1:-start}" in
@@ -30,16 +45,17 @@ case "${1:-start}" in
             exit 0
         fi
 
-        # Kill stale tmux session
-        tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+        # Kill stale tmux session. Child tmux processes must not inherit FD 9,
+        # otherwise a newly created tmux server can hold the data lock forever.
+        tmux kill-session -t "$SESSION_NAME" 9>&- 2>/dev/null || true
         sleep 1
 
         # Create tmux with 2 panes: Qdrant (top) + mem0-server (bottom)
-        tmux new-session -d -s "$SESSION_NAME" -n mem0
-        tmux send-keys -t "$SESSION_NAME" "cd '$QDRANT_DIR' && '$QDRANT_BIN'" Enter
+        tmux new-session -d -s "$SESSION_NAME" -n mem0 9>&-
+        tmux send-keys -t "$SESSION_NAME" "cd '$QDRANT_DIR' && QDRANT__SERVICE__HOST=127.0.0.1 '$QDRANT_BIN'" Enter 9>&-
         sleep 2
-        tmux split-window -v -t "$SESSION_NAME"
-        tmux send-keys -t "$SESSION_NAME" "cd '$SERVER_DIR' && '$VENV_PYTHON' '$SERVER_SCRIPT'" Enter
+        tmux split-window -v -t "$SESSION_NAME" 9>&-
+        tmux send-keys -t "$SESSION_NAME" "cd '$SERVER_DIR' && '$VENV_PYTHON' '$SERVER_SCRIPT'" Enter 9>&-
 
         # 轮询健康检查最多 30 秒
         echo "   Waiting for services (30s timeout)..."
@@ -67,9 +83,9 @@ case "${1:-start}" in
         fi
         ;;
     stop)
-        tmux send-keys -t "$SESSION_NAME" C-c 2>/dev/null || true
+        tmux send-keys -t "$SESSION_NAME" C-c 9>&- 2>/dev/null || true
         sleep 2
-        tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+        tmux kill-session -t "$SESSION_NAME" 9>&- 2>/dev/null || true
         if health_check_mem0 || health_check_qdrant; then
             echo "Warning: some services still running after stop."
             exit 1
@@ -84,10 +100,10 @@ case "${1:-start}" in
     status)
         echo "Qdrant:   $(health_check_qdrant && echo 'RUNNING' || echo 'DOWN')"
         echo "mem0:     $(health_check_mem0 && echo 'RUNNING' || echo 'DOWN')"
-        echo "Tmux:     $(tmux has-session -t "$SESSION_NAME" 2>/dev/null && echo 'active' || echo 'inactive')"
+        echo "Tmux:     $(tmux has-session -t "$SESSION_NAME" 9>&- 2>/dev/null && echo 'active' || echo 'inactive')"
         if health_check_mem0; then
             echo ""
-            curl -s "http://localhost:$MEM0_PORT/v1/health" | python3 -m json.tool 2>/dev/null || true
+            curl -s "http://127.0.0.1:$MEM0_PORT/v1/health" | python3 -m json.tool 2>/dev/null || true
         fi
         [ "$1" = "status" ] || exit 0
         health_check_qdrant || exit 1
