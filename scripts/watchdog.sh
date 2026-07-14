@@ -1,7 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # mem0-provider-watchdog.sh — Check if all mem0 LLM providers are blacklisted
 # Usage: called by hermes cronjob, stdout delivered as message
-BLACKLIST="/home/lmr/.mem0-server/provider_blacklist.json"
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BLACKLIST="$SCRIPT_DIR/provider_blacklist.json"
 
 if [ ! -f "$BLACKLIST" ]; then
     exit 0

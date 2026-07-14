@@ -1,7 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # mem0-provider-unblacklist.sh — Clear provider blacklist, daily at 10:00
 # Usage: called by cron or hermes cronjob
-BLACKLIST="/home/lmr/.mem0-server/provider_blacklist.json"
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BLACKLIST="$SCRIPT_DIR/provider_blacklist.json"
 
 if [ -f "$BLACKLIST" ]; then
     CONTENT=$(cat "$BLACKLIST")

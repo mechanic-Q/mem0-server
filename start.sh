@@ -1,3 +1,5 @@
-#!/bin/bash
-cd /home/lmr/.mem0-server
-exec /home/lmr/.mem0-server/venv/bin/python server.py
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+exec "$SCRIPT_DIR/venv/bin/python" server.py

@@ -1,131 +1,224 @@
-# mem0-server | 免费 LLM + 本地 Embedding 自托管记忆服务
+# mem0-server
 
-A self-hosted memory server using **free LLM APIs** + **local ONNX embedding** — zero cost, minimal resources.
+面向 Windows WSL2 + Hermes Agent 的本地长期记忆服务。
 
-基于 mem0ai SDK，通过工厂体系注入自定义 provider，实现完全免费的 Agent 长期记忆。
+- 事实抽取：用户自己的远程 LLM Key，支持多 Provider 回退
+- Embedding：本地 KaLM Q4F16 ONNX，896 维
+- 向量库：本地 Qdrant 1.17.1
+- Hermes：使用官方 `SelfHostedBackend`，不修改 Hermes 源码
+- 核心端口：`8050`（mem0-server）、`6333/6334`（Qdrant）
 
-> 适用硬件：7.6GB RAM, ~1.3GB 可用内存（KaLM ONNX 896d 本地推理，无 GPU）
+mem0-server 与 Qdrant 默认只监听 `127.0.0.1`，不向局域网暴露无认证的记忆接口。
 
----
+本部署**不包含独立 8051 Embedding 服务**。KaLM 在 mem0-server 进程内运行。
 
-## 架构
+## 方案 A
 
+Hermes 官方客户端调用：
+
+```text
+POST   /memories
+POST   /search
+PUT    /memories/{id}
+DELETE /memories/{id}
 ```
-┌─────────────┐     HTTP      ┌──────────────┐
-│ Hermes /     │ ──────────→  │  mem0-server  │
-│ OpenCode /   │  add/search  │  (port 8050)   │
-│ 任意 Agent   │              │                │
-└─────────────┘              │  LLM:  智谱/OpenRouter 免费 API      │
-                             │  Embed: KaLM Q4F16 ONNX (896d,本地) │
-                             │  VStore: Qdrant                     │
-                             └────────────────────────────────────┘
-```
 
-- **LLM**：FallbackLLM 多 provider 回退链 — 智谱 GLM-4-Flash → OpenRouter 免费模型 → 自动跳过不兼容 / 限流
-- **Embedding**：KaLM ONNX 896d 本地推理，零 API 费用
-- **Vector Store**：Qdrant Docker 容器
-- **全部组件通过 mem0 工厂体系创建**，零运行时 monkey-patch
+本服务直接提供这些入口，并复用原有 v1/v3 业务函数。因此：
 
----
+- 不再维护 Hermes `0003/0004/0005` 补丁；
+- Hermes 升级不会覆盖本仓库的兼容层；
+- 记忆仍在原来的 `mem0_shared` Collection；
+- 不迁移、不重建、不更换 896 维 Embedding。
 
-## 自定义改动清单
+## 支持范围
 
-本仓库对 mem0 做了以下定制化修改，**重新部署或升级时需要手动恢复**。
+第一版只支持：
 
-### 1. `fallback_llm.py`（本仓库内，git 管理 ✅）
+- Windows WSL2；
+- x86_64 Linux；
+- Hermes 已安装，且源码目录为 `~/.hermes/hermes-agent`；
+- Hermes Git `HEAD` 已包含官方 `SelfHostedBackend` 契约；
+- `python3`、`uv`、`curl`、`tmux`、`git`、`tar`、`sha256sum`、`flock` 已存在。
 
-自定义 LLM provider，继承 OpenAILLM：
-- **20s 超时** — 快速跳过 API 卡顿的免费模型
-- **400/429/timeout 自动跳过** — 限速、参数错误不阻塞
-- **None 响应跳过** — 免费模型返回 HTTP 200 但 `content: null` 时自动 fallback
-- **Provider 黑名单** — 402/quota 等额度耗尽错误自动拉黑，跳过后续调用，省去每次等待超时
+安装器不会静默执行 `apt install`，缺少基础命令会明确失败。
 
-**恢复方法**：`git checkout -- fallback_llm.py` 即可恢复。
+## 一键部署
 
-### 2. `main.py` 两个 None guard 补丁（site-packages，非本仓库 ⚠️）
+先审查：
 
-**文件位置**：`/home/lmr/.mem0-server/venv/lib/python3.12/site-packages/mem0/memory/main.py`
-
-**改动**：sync `add()`（L750）和 async `add()`（L2169）各加了一段 `if response is None` 判断。
-- 原代码：`remove_code_blocks(response)` → LLM 返回 None 时触发 `None.strip()` 崩溃
-- 修改后：None 时直接 `extracted_memories = []`，跳过 parser
-
-**补丁文件**：`patches/0001-main.py-none-guard.patch`
-
-**恢复方法**（`uv pip install --upgrade mem0` 覆盖后）：
 ```bash
 cd ~/.mem0-server
-patch -d venv/lib/python3.12/site-packages/mem0/memory/ < patches/0001-main.py-none-guard.patch
-systemctl --user restart mem0-server
+bash install.sh --dry-run --non-interactive
 ```
 
-### 3. `scripts/` 运维脚本（本仓库内，git 管理 ✅）
-
-| 脚本 | 用途 |
-|------|------|
-| `scripts/watchdog.sh` | 检查 provider 黑名单，有失效 provider 时通知 |
-| `scripts/unblacklist.sh` | 每天 10:00 清空黑名单，让所有 provider 重新可尝试 |
-
-### 4. `provider_blacklist.json`（运行态文件，git ignore）
-
-自动生成。额度耗尽的 provider 被记录到此文件。清空即恢复。
-
-### 5. Cron Jobs（Hermes Agent 管理）
-
-| Job | 频率 | 作用 |
-|-----|------|------|
-| mem0-provider监控 | 每 2h | 检查黑名单 → 有失效 provider 时通知用户 |
-| mem0-黑名单清空 | 每天 10:00 | 清空黑名单文件，全部 provider 重新尝试 |
-
-恢复方法：在 Hermes Agent 中执行 `cronjob action='list'` 查看，缺少时手动重建。
-
----
-
-## 整体恢复流程（被完全覆盖时）
+正式执行：
 
 ```bash
-# 1. 恢复本仓库文件
-cd ~/.mem0-server
-git reset --hard HEAD && git clean -fd
-# 或重新 clone：
-# git clone https://github.com/mechanic-Q/mem0-server.git ~/.mem0-server
-
-# 2. 恢复 main.py 补丁（site-packages）
-patch -d venv/lib/python3.12/site-packages/mem0/memory/ < patches/0001-main.py-none-guard.patch
-
-# 3. 重启服务
-systemctl --user restart mem0-server
-
-# 4. 重建 cron jobs（Hermes 中执行）
-cronjob action='create' name='mem0-provider监控' schedule='every 2h' script='scripts/watchdog.sh' workdir='/home/lmr/.mem0-server' no_agent=True
-cronjob action='create' name='mem0-黑名单清空' schedule='0 10 * * *' script='scripts/unblacklist.sh' workdir='/home/lmr/.mem0-server' no_agent=True
+bash install.sh
 ```
 
----
+脚本会：
 
-## 文件
+1. 验证 WSL2、Hermes Git `HEAD` 和基础命令；
+2. 下载并校验固定版 Qdrant；
+3. 检测现有 `mem0_shared`；
+4. 有旧数据时创建 Qdrant 原生 snapshot、SQLite Backup 和全量 `ID+payload` 基线；
+5. 在随机临时端口恢复 snapshot，并逐条验证旧 payload；
+6. 引导用户取得并输入自己的 LLM Key；
+7. 下载并校验固定提交的 KaLM 模型；
+8. 创建 venv 并按完整 lock 文件安装固定版本依赖；
+9. 配置 Hermes 指向 `http://127.0.0.1:8050`；
+10. 启动服务；
+11. 从 Hermes Git `HEAD` 提取未修改的官方插件，在隔离用户下运行 CRUD + `sync_turn`；
+12. 清理测试记忆并确认旧 ID/payload 未减少或变化。
 
-| 文件 | 说明 |
-|------|------|
-| `server.py` | FastAPI 服务 + LLM 链构建 |
-| `fallback_llm.py` | 自定义 LLM provider（20s 超时, 400/429/timeout 自动回退, 黑名单） |
-| `kalm_onnx_embedding.py` | 自定义 embedding provider（KaLM ONNX 本地推理） |
-| `mem0-server.service` | systemd 服务文件 |
-| `requirements.txt` | 依赖版本（已 pin） |
-| `scripts/watchdog.sh` | 黑名单监控脚本 |
-| `scripts/unblacklist.sh` | 每日清黑名单脚本 |
-| `patches/0001-main.py-none-guard.patch` | site-packages main.py 补丁（被覆盖后恢复用） |
+任一验证失败，脚本返回非零，不报告成功。
 
-## 依赖
+如果 Hermes 当前 `_backend.py` 与其 Git `HEAD` 不一致（例如仍装着旧 0005 补丁），安装器会拒绝继续。先备份该文件，再恢复 Hermes 官方版本；方案 A 不再修改 Hermes 源码。
 
+### 非交互模式
+
+至少设置一个环境变量：
+
+```bash
+read -r -s MEM0_ZHIPU_API_KEY
+export MEM0_ZHIPU_API_KEY
+# 或 MEM0_AGNES_API_KEY
+# 或 MEM0_NVIDIA_API_KEY
+bash install.sh --non-interactive
 ```
-mem0ai==2.0.1
-openai==2.34.0
-onnxruntime==1.25.1
+
+Key 只写入本机仓库目录下的隐藏文件，权限 `600`；不会进入 Git、README、命令输出或备份。
+
+Provider 注册地址：
+
+- 智谱：<https://bigmodel.cn/usercenter/proj-mgmt/apikeys>
+- Agnes：<https://platform.agnes-ai.com/>
+- NVIDIA NIM：<https://build.nvidia.com/settings/api-keys>
+
+## 固定下载资产
+
+### Qdrant
+
+```text
+版本: v1.17.1
+文件: qdrant-x86_64-unknown-linux-gnu.tar.gz
+SHA-256: 318a3b1c548161ad476f9ff70b654787a20fc46685e3e1c2b7dd88b363ef3d58
 ```
 
-## 升级安全
+### KaLM ONNX
 
-- `pip install --upgrade mem0ai` → main.py 补丁会被覆盖，需重新 `patch`
-- `hermes update` 不影响 — 不在 hermes 目录内
-- 所有改动在 `~/.mem0-server/` 独立目录，git 管理
+```text
+仓库: thomasht86/KaLM-embedding-multilingual-mini-instruct-v2.5-ONNX
+提交: 1ef826ab24cfcf52243ea16fefaf239b8c7fa285
+模型: onnx/model_q4f16.onnx
+SHA-256: c5eb8abd440e7778cead911606521f52e1b35067bb648484f2928d83f2b314b4
+```
+
+模型及 tokenizer 不进入本仓库，由安装器下载并校验。KaLM 上游模型标注为 Apache-2.0；这是第三方资产许可，不改变本仓库许可。
+
+## 数据保护
+
+### 一致性备份
+
+```bash
+bash backup.sh
+```
+
+无参数运行时，保护包默认保存到 `~/mem0-backups/auto/<时间戳>/`，包含：
+
+- Qdrant 官方 Collection snapshot；
+- SQLite Backup API 生成的 `history.db`；
+- 全量 `ID+payload` JSONL；
+- `manifest.json`；
+- `SHA256SUMS`。
+
+保护包完成后会删除 Qdrant 内部本次生成的临时 snapshot，避免定时备份持续占用正式数据盘；已经下载到保护包中的 snapshot 不受影响。
+
+自动保护包默认仅保留最近 7 份。显式传入输出目录的手工保护包和安装器创建的 `pre-install-*` 保护包不参与自动清理。可用 `MEM0_BACKUP_KEEP` 调整自动保留数量。
+
+旧 `scripts/snapshot.sh` 仅转交 `backup.sh`。不会在 Qdrant 运行时直接复制 `data/storage/`。
+
+### 验证现有数据
+
+```bash
+venv/bin/python scripts/data_guard.py verify \
+  --backup ~/mem0-backups/<保护包目录>
+```
+
+规则：
+
+- 允许安装期间新增记忆；
+- 不允许任何保护前 ID 消失；
+- 不允许任何保护前 payload 改变；
+- Collection 必须保持 green；
+- 向量配置必须保持不变。
+
+### 隔离恢复演练
+
+```bash
+venv/bin/python scripts/data_guard.py restore-verify \
+  --backup ~/mem0-backups/<保护包目录> \
+  --qdrant-bin ~/.local/bin/qdrant
+```
+
+该命令在随机临时端口启动第二个 Qdrant，恢复后逐条比较，再自动停止并删除临时目录；不会停止或修改正式 6333。
+
+## 运维
+
+```bash
+./start-daemon.sh start
+./start-daemon.sh status
+./start-daemon.sh restart
+./start-daemon.sh stop
+```
+
+健康检查：
+
+```bash
+curl -fsS http://127.0.0.1:8050/v1/health | python3 -m json.tool
+curl -fsS http://127.0.0.1:6333/collections/mem0_shared | python3 -m json.tool
+```
+
+原版 Hermes 验收：
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python scripts/verify_install.py \
+  --hermes-repo ~/.hermes/hermes-agent
+```
+
+验收器使用独立 `HERMES_HOME` 和独立测试 `user_id`，完成后删除所有测试记忆。
+
+## 测试
+
+不额外依赖 pytest：
+
+```bash
+venv/bin/python tests/test_stock_hermes_api.py -v
+venv/bin/python tests/test_data_guard.py -v
+venv/bin/python tests/test_verify_install.py -v
+venv/bin/python tests/test_install_script.py -v
+venv/bin/python tests/test_fallback_llm.py -v
+bash -n install.sh restore.sh backup.sh start-daemon.sh health-check.sh scripts/snapshot.sh
+```
+
+## 关键文件
+
+| 文件 | 用途 |
+|---|---|
+| `server.py` | FastAPI、官方 Hermes 兼容入口、Mem0 SDK 配置 |
+| `fallback_llm.py` | 多 Provider LLM 回退和黑名单 |
+| `kalm_onnx_embedding.py` | 进程内 KaLM ONNX Embedding |
+| `install.sh` | WSL2 一键部署与验收 |
+| `scripts/data_guard.py` | snapshot、SQLite Backup、基线与恢复验证 |
+| `scripts/verify_install.py` | 原版 Hermes Provider 端到端验收 |
+| `start-daemon.sh` | WSL2 tmux 守护 |
+| `backup.sh` | 一致性备份入口 |
+
+## 许可
+
+Copyright © mechanic-Q. All rights reserved.
+
+本仓库采用 **Proprietary Source-Available License**：源代码可以公开查看，但未经版权所有者明确书面许可，不得复制、使用、修改、分发、部署、再许可或用于商业/非商业项目。
+
+本仓库不是 MIT、Apache、GPL 或其他开源许可项目。第三方依赖和下载资产分别遵守其自身许可。

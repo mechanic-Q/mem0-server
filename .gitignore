@@ -21,3 +21,8 @@ server.log
 embeddings-server.log
 health-check.log
 *.gz
+.snapshots/
+.downloads/
+.last-data-guard
+.data-operation.lock
+*.snapshot
