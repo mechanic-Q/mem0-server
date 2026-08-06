@@ -93,9 +93,9 @@ case "${1:-start}" in
         echo "mem0-stack stopped."
         ;;
     restart)
-        "$0" stop
+        "$SCRIPT_DIR/start-daemon.sh" stop
         sleep 2
-        "$0" start
+        "$SCRIPT_DIR/start-daemon.sh" start
         ;;
     status)
         echo "Qdrant:   $(health_check_qdrant && echo 'RUNNING' || echo 'DOWN')"
