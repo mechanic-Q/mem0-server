@@ -78,7 +78,18 @@ run() {
 }
 
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || fail "缺少命令: $1。请先安装后重试；本脚本不会静默 apt install。"
+  if command -v "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  # 缺失时给出安装提示(按常见包归属)
+  case "$1" in
+    fuser)   fail "缺少命令: fuser (psmisc 包)。请先安装: sudo apt install psmisc" ;;
+    tmux)    fail "缺少命令: tmux。请先安装: sudo apt install tmux" ;;
+    flock)   fail "缺少命令: flock (util-linux 包)。请先安装: sudo apt install util-linux" ;;
+    curl)    fail "缺少命令: curl。请先安装: sudo apt install curl" ;;
+    uv)      fail "缺少命令: uv (astral)。请先安装: curl -LsSf https://astral.sh/uv/install.sh | sh" ;;
+    *)       fail "缺少命令: $1。请先安装后重试；本脚本不会静默 apt install。" ;;
+  esac
 }
 
 check_prerequisites() {
@@ -86,7 +97,10 @@ check_prerequisites() {
   if ((DRY_RUN == 0)) && [[ "$SCRIPT_DIR" != "$HOME/.mem0-server" ]]; then
     fail "正式部署必须从 $HOME/.mem0-server 运行；当前目录是 $SCRIPT_DIR。"
   fi
-  for command in python3 uv curl tmux git tar sha256sum flock hermes; do
+  # 基础命令(按来源分组, 缺失时提示安装方法)
+  # core: python3 uv curl tmux git tar sha256sum flock hermes
+  # psmisc 包: fuser (embeddings-watchdog 用它杀占用 8051 的残留进程)
+  for command in python3 uv curl tmux git tar sha256sum flock hermes fuser; do
     require_command "$command"
   done
   [[ -x "$HERMES_PYTHON" ]] || fail "Hermes venv 不存在: $HERMES_PYTHON"

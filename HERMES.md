@@ -44,7 +44,11 @@ DELETE /memories/{id}
 
 1. **环境**: Windows WSL2(`grep -qi microsoft /proc/sys/kernel/osrelease`)
 2. **Hermes**: `~/.hermes/hermes-agent` 存在且是 Git 仓库, `venv/bin/python` 存在
-3. **依赖命令**: `python3 uv curl tmux git tar sha256sum flock hermes`
+3. **依赖命令**: `python3 uv curl tmux git tar sha256sum flock hermes fuser`
+   - 缺 `fuser` → `sudo apt install psmisc`; 缺 `tmux` → `sudo apt install tmux`;
+   - 缺 `uv` → `curl -LsSf https://astral.sh/uv/install.sh | sh`;
+   - 缺 `flock` → `sudo apt install util-linux`
+   - 脚本不会静默 `apt install`, 会明确失败并给出安装提示
 4. **网络**: 能访问 `github.com`(Qdrant 下载)与 `huggingface.co`(KaLM 模型下载)
 5. **密钥**: 至少一个 Provider Key(智谱/Agnes/NVIDIA NIM), 见下方「密钥配置」
 
