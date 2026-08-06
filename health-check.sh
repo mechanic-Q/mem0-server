@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # mem0-server health check cron script
 # Runs every 5 min — if server is down, logs and attempts restart.
+# Also: 每日黑名单补漏 — 过 10:00 且今天未清时清空 provider 黑名单
+# (与 hermes cron 每日 10:00 互补, 保证 Hermes 未在线时黑名单也会被清)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,6 +17,24 @@ health_check() {
 ts() {
     date "+%Y-%m-%d %H:%M:%S"
 }
+
+# ── 黑名单补漏: 过 10:00 且今天未清 → 清空 ──
+HOUR=$(date +%H)
+if [ "$HOUR" -ge 10 ]; then
+    MARKER_DIR="$SCRIPT_DIR/.blacklist_markers"
+    MARKER_FILE="$MARKER_DIR/cleared_$(date +%Y%m%d)"
+    BLACKLIST="$SCRIPT_DIR/provider_blacklist.json"
+    if [ ! -f "$MARKER_FILE" ] && [ -f "$BLACKLIST" ]; then
+        mkdir -p "$MARKER_DIR"
+        CONTENT=$(cat "$BLACKLIST" 2>/dev/null || true)
+        if [ "$CONTENT" != "{}" ] && [ -n "$CONTENT" ]; then
+            echo '{}' > "$BLACKLIST"
+            echo "$(ts) [OK] Blacklist cleared (health-check catch-up, 过10点未清)" >> "$SCRIPT_DIR/blacklist_clearance.log"
+        fi
+        find "$MARKER_DIR" -name "cleared_*" -mtime +7 -delete 2>/dev/null || true
+        touch "$MARKER_FILE"
+    fi
+fi
 
 if health_check; then
     exit 0
