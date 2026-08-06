@@ -297,7 +297,8 @@ install_cron() {
   ((SKIP_CRON == 0)) || return 0
   command -v crontab >/dev/null 2>&1 || { printf '⚠️ 未安装 crontab，跳过定时任务\n'; return 0; }
   if ((DRY_RUN)); then
-    printf '[dry-run] 安装每 5 分钟健康检查和每 6 小时一致性备份\n'
+    printf '[dry-run] 安装 3 条 crontab: 健康检查(8050) 每5分 + embedding守护(8051) 每5分 + 一致性备份 每6小时\n'
+    printf '[dry-run] 并安装 Hermes cron: mem0-process-watchdog(8050保活) + mem0-blacklist-daily-reset(每日清黑名单)\n'
     return 0
   fi
   local current block start end
@@ -315,14 +316,18 @@ root = os.environ["MEM0_SCRIPT_DIR"]
 legacy = {
     f"*/5 * * * * {root}/health-check.sh",
     f"0 */6 * * * {root}/backup.sh",
+    f"*/5 * * * * {root}/scripts/embeddings-watchdog.sh",
 }
 print("\n".join(line for line in s.splitlines() if line.strip() not in legacy), end="")
 ')"
+  # 3 条 crontab: 8050 健康检查 + 8051 embedding 守护 + 6h 数据备份
   block="$start
 */5 * * * * $SCRIPT_DIR/health-check.sh
+*/5 * * * * $SCRIPT_DIR/scripts/embeddings-watchdog.sh
 0 */6 * * * $SCRIPT_DIR/backup.sh
 $end"
   printf '%s\n%s\n' "$current" "$block" | crontab -
+  printf 'Crontab 已安装 3 条 mem0 任务（健康检查/embedding守护/备份）。\n'
 }
 
 # 场景识别: 首次安装(无模型/无数据) vs 恢复适配(已有模型/数据, 升级后重跑)
@@ -334,6 +339,39 @@ detect_scenario() {
     info "场景 A: 首次安装 —— 未检测到模型, 本次将从零下载并部署本地化 mem0。"
     info "          自动化下载 Qdrant + KaLM 模型 + Python 依赖, 无需手动准备任何文件。"
   fi
+}
+
+# 安装 Hermes cron job: mem0-process-watchdog(8050保活) + mem0-blacklist-daily-reset(每日清黑名单)
+# 注意: hermes cron 的 script 必须物理位于 ~/.hermes/scripts/ (符号链接会被拒绝)
+install_hermes_cron() {
+  ((SKIP_CRON == 0)) || return 0
+  local hs="$HERMES_DIR/scripts"
+  mkdir -p "$hs"
+  # 拷贝脚本(幂等; 内容有更新时覆盖)
+  cp -f "$SCRIPT_DIR/scripts/process-watchdog.sh" "$hs/mem0-process-watchdog.sh" 2>/dev/null || true
+  cp -f "$SCRIPT_DIR/scripts/clear-blacklist.sh" "$hs/mem0-blacklist-reset.sh" 2>/dev/null || true
+  chmod +x "$hs/mem0-process-watchdog.sh" "$hs/mem0-blacklist-reset.sh" 2>/dev/null || true
+
+  if ((DRY_RUN)); then
+    printf '[dry-run] 拷贝看门狗/清黑名单脚本到 %s\n' "$hs"
+    printf '[dry-run] hermes cron 注册 mem0-process-watchdog (每5m) + mem0-blacklist-daily-reset (每日10:00)\n'
+    return 0
+  fi
+
+  # 已有 job 则跳过(幂等)
+  if ! hermes cron list 2>/dev/null | grep -q "mem0-process-watchdog"; then
+    hermes cron create "every 5m" \
+      --name mem0-process-watchdog \
+      --script "$hs/mem0-process-watchdog.sh" \
+      --no-agent 2>/dev/null || true
+  fi
+  if ! hermes cron list 2>/dev/null | grep -q "mem0-blacklist-daily-reset"; then
+    hermes cron create "0 10 * * *" \
+      --name mem0-blacklist-daily-reset \
+      --script "$hs/mem0-blacklist-reset.sh" \
+      --no-agent 2>/dev/null || true
+  fi
+  printf 'Hermes cron 已注册 2 个 mem0 job（8050保活 + 每日清黑名单）。\n'
 }
 
 main() {
@@ -369,6 +407,7 @@ main() {
     printf '[dry-run] %s scripts/verify_install.py --hermes-repo %s\n' "$HERMES_PYTHON" "$HERMES_REPO"
   fi
   install_cron
+  install_hermes_cron
   HERMES_ROLLBACK_ARMED=0
   ok "部署与验收完成；重新启动 Hermes 会话后加载 self-hosted HTTP 配置。"
 }

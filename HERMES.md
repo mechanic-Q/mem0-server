@@ -130,6 +130,27 @@ Provider 与注册地址:
 - Hermes `_backend.py` 若与其 Git HEAD 不一致(如残留旧补丁), `install.sh` 拒绝继续——先恢复官方版本, 再跑
 - 所有写入 Hermes 配置的操作幂等, 且保留回滚备份
 
+## 自动化安装(install.sh 自动完成, 零手动)
+
+`install.sh` 会把以下全部自动化**一次性装好**, 新机器部署完不需要手动配任何守护:
+
+**crontab(3 条):**
+| 调度 | 脚本 | 作用 |
+|---|---|---|
+| 每 5 分钟 | `health-check.sh` | 检查 8050, 挂了自动重启 |
+| 每 5 分钟 | `scripts/embeddings-watchdog.sh` | 检查 8051 embedding, 挂了自动重启 |
+| 每 6 小时 | `backup.sh` | 一致性备份(Qdrant snapshot + SQLite + ID/payload)到 `~/mem0-backups/` |
+
+**Hermes cron(2 个 job, 脚本拷贝到 `~/.hermes/scripts/`):**
+| 调度 | job | 作用 |
+|---|---|---|
+| 每 5 分钟 | `mem0-process-watchdog` | 8050 保活(调 start-daemon.sh restart) |
+| 每日 10:00 | `mem0-blacklist-daily-reset` | 清空 LLM provider 黑名单 |
+
+**开机自启**: WSL2 无 systemd, 靠 crontab 的 health-check(每5分)检测到服务死 → 自动 `start-daemon.sh start` 拉起。打开 WSL 后约 5 分钟内自动恢复全部服务, 无需手动操作。
+
+**幂等**: 重跑 `install.sh` 不会重复安装 cron(已存在则跳过), 脚本内容更新会覆盖拷贝。
+
 ## 失败处理(Agent 判定标准)
 
 | 症状 | 处理 |

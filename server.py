@@ -91,11 +91,11 @@ if AGNES_KEY:
         })
 
 # NVIDIA NIM — free tier models (JSON mode verified)
+# NOTE: qwen/qwen3.5-122b-a10b 已 EOL (2026-07-20 下线, API 返回 410 Gone), 已移除
 NVIDIA_KEY = _load_key(".nvidia_key")
 if NVIDIA_KEY:
     for model_name, model_id in [
         ("NVIDIA/Llama-3.1-70B", "meta/llama-3.1-70b-instruct"),
-        ("NVIDIA/Qwen3.5-122B", "qwen/qwen3.5-122b-a10b"),
         ("NVIDIA/Gemma-4-31B", "google/gemma-4-31b-it"),
     ]:
         LLM_CHAIN.append({
