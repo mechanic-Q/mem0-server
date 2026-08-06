@@ -2,6 +2,10 @@
 
 面向 Windows WSL2 + Hermes Agent 的本地长期记忆服务。
 
+> **给 Agent(另一台 Hermes / AI 编码助手)**: 执行前先读 **HERMES.md**。
+> 它定义了「首次安装」与「升级后恢复适配」两个场景的完整流程、检查点、密钥配置和自动化下载清单。
+> 两个场景都只需一条命令: `bash install.sh`(脚本自动识别场景、幂等)。
+
 - 事实抽取：用户自己的远程 LLM Key，支持多 Provider 回退
 - Embedding：本地 KaLM Q4F16 ONNX，896 维
 - 向量库：本地 Qdrant 1.17.1

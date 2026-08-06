@@ -325,7 +325,19 @@ $end"
   printf '%s\n%s\n' "$current" "$block" | crontab -
 }
 
+# 场景识别: 首次安装(无模型/无数据) vs 恢复适配(已有模型/数据, 升级后重跑)
+detect_scenario() {
+  if [[ -f "$MODEL_DIR/model_q4f16.onnx" ]]; then
+    info "场景 B: 恢复/适配 —— 检测到已有模型与数据, 本次将验证并重新接线(幂等)。"
+    info "          (Hermes 升级后重跑本脚本, 即完成对新版的本地化适配)"
+  else
+    info "场景 A: 首次安装 —— 未检测到模型, 本次将从零下载并部署本地化 mem0。"
+    info "          自动化下载 Qdrant + KaLM 模型 + Python 依赖, 无需手动准备任何文件。"
+  fi
+}
+
 main() {
+  detect_scenario
   info "前置检查"
   check_prerequisites
   info "Qdrant 固定资产"
