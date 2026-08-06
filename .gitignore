@@ -26,3 +26,4 @@ health-check.log
 .last-data-guard
 .data-operation.lock
 *.snapshot
+embeddings-watchdog.log
