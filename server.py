@@ -4,16 +4,27 @@ LLM: OpenRouter(free) → DeepSeek (auto-fallback on 402/429)
 Embedding: KaLM Q4F16 ONNX (local, 896d)
 Vector Store: Qdrant
 API: mem0-compatible HTTP for Hermes, OpenCode, and any agent.
+
+Collection routing (physical isolation between agents):
+  MEM0_COLLECTION env selects the server's default collection.
+  Additional collections are declared in EXTRA_COLLECTIONS (JSON dict
+  name -> agent_id) and auto-created at startup. Clients pick a
+  collection with the X-Mem0-Collection header; if unset, requests
+  with agent_id="hermes" go to MEM0_COLLECTION and other agent_ids
+  fall back to MEM0_COLLECTION (shared). This keeps Hermes memories
+  physically separate from DSH memories (mem0_dsh).
 """
 
 import os
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from mem0 import Memory
+from qdrant_client import QdrantClient
 
 # ---------------------------------------------------------------------------
 # Config
@@ -23,6 +34,15 @@ MEM0_HOST = os.environ.get("MEM0_HOST", "127.0.0.1")
 QDRANT_HOST = os.environ.get("QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT = int(os.environ.get("QDRANT_PORT", "6333"))
 COLLECTION_NAME = os.environ.get("MEM0_COLLECTION", "mem0_shared")
+EMBED_DIM = 896
+
+# Extra isolated collections: name -> agent_id that owns it.
+# e.g. {"mem0_dsh": "dsh"} — requests with agent_id="dsh" (or the
+# X-Mem0-Collection header) use mem0_dsh instead of the shared store.
+try:
+    EXTRA_COLLECTIONS = json.loads(os.environ.get("EXTRA_COLLECTIONS", "{}"))
+except ValueError:
+    EXTRA_COLLECTIONS = {}
 
 MODEL_DIR = os.environ.get("MEM0_MODEL_DIR", os.path.join(os.path.dirname(__file__), "models"))
 MODEL_FILE = os.path.join(MODEL_DIR, "model_q4f16.onnx")
@@ -35,7 +55,7 @@ logger = logging.getLogger("mem0-server")
 
 # 文件日志：覆盖 root logger，让 server.py 自己的 logger、mem0、httpx、uvicorn 都落盘
 # RotatingFileHandler 限制单文件 10MB × 5 份，避免 server.log 无限增长
-_LOG_FILE = os.path.join(SERVER_DIR, "server.log")
+_LOG_FILE = os.environ.get("MEM0_LOG_FILE", os.path.join(SERVER_DIR, "server.log"))
 _file_handler = RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
 _file_handler.setLevel(logging.INFO)
@@ -92,10 +112,10 @@ if AGNES_KEY:
 
 # NVIDIA NIM — free tier models (JSON mode verified)
 # NOTE: qwen/qwen3.5-122b-a10b 已 EOL (2026-07-20 下线, API 返回 410 Gone), 已移除
+# NOTE: meta/llama-3.1-70b-instruct 已 EOL (2026-08-26 下线, API 返回 410 Gone), 已移除
 NVIDIA_KEY = _load_key(".nvidia_key")
 if NVIDIA_KEY:
     for model_name, model_id in [
-        ("NVIDIA/Llama-3.1-70B", "meta/llama-3.1-70b-instruct"),
         ("NVIDIA/Gemma-4-31B", "google/gemma-4-31b-it"),
     ]:
         LLM_CHAIN.append({
@@ -157,6 +177,44 @@ config_dict = {
 
 mem0_client = Memory.from_config(config_dict)
 logger.info("mem0ai SDK initialized — all providers via factory")
+# ---------------------------------------------------------------------------
+# Per-collection clients (physical isolation)
+# ---------------------------------------------------------------------------
+_qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+
+# Ensure every declared collection exists (idempotent).
+_collections = {}
+for _name, _owner in EXTRA_COLLECTIONS.items():
+    try:
+        _qdrant.create_collection(
+            collection_name=_name,
+            vectors_config={"size": EMBED_DIM, "distance": "Cosine"},
+            on_disk_payload=True,
+        )
+    except Exception:
+        pass  # already exists
+    _cfg = dict(config_dict)
+    _cfg["vector_store"]["config"] = dict(_cfg["vector_store"]["config"])
+    _cfg["vector_store"]["config"]["collection_name"] = _name
+    _collections[_name] = Memory.from_config(_cfg)
+    logger.info("isolated collection ready: %s (owner agent_id=%s)", _name, _owner)
+
+def _client_for(req: Request, agent_id: str, legacy_collection: Optional[str] = None) -> Memory:
+    """Pick the Memory client for a request.
+
+    Priority: X-Mem0-Collection header -> legacy_collection -> EXTRA_COLLECTIONS
+    owner match on agent_id -> shared client.
+    """
+    header = req.headers.get("x-mem0-collection")
+    if header and header in _collections:
+        return _collections[header]
+    if legacy_collection and legacy_collection in _collections:
+        return _collections[legacy_collection]
+    for _name, _owner in EXTRA_COLLECTIONS.items():
+        if agent_id and agent_id == _owner:
+            return _collections[_name]
+    return mem0_client
+
 logger.info("LLM chain: %s", " → ".join(p["name"] for p in LLM_CHAIN))
 
 
@@ -203,12 +261,13 @@ async def health():
         "embedder": "KaLM Q4F16 ONNX (896d, local)",
         "vector_store": f"Qdrant @ {QDRANT_HOST}:{QDRANT_PORT}",
         "collection": COLLECTION_NAME,
+        "extra_collections": list(_collections.keys()),
         "sdk": "mem0ai (dedup/merge/extraction)",
     }
 
 
 @app.post("/v1/memories")
-async def add_memory(req: AddRequest):
+async def add_memory(req: AddRequest, request: Request):
     """Store memory with SDK-powered extraction, dedup, and merge."""
     try:
         if req.messages:
@@ -224,7 +283,8 @@ async def add_memory(req: AddRequest):
         if req.metadata:
             kwargs["metadata"] = req.metadata
 
-        result = mem0_client.add(**kwargs)
+        client = _client_for(request, req.agent_id)
+        result = client.add(**kwargs)
         if isinstance(result, dict):
             return result
         return {"results": result}
@@ -235,13 +295,14 @@ async def add_memory(req: AddRequest):
 
 
 @app.get("/v1/memories")
-async def get_memories(user_id: str = "hermes-user", agent_id: Optional[str] = None):
+async def get_memories(request: Request, user_id: str = "hermes-user", agent_id: Optional[str] = None):
     """Get all memories for a user."""
     try:
         filters = {"user_id": user_id}
         if agent_id:
             filters["agent_id"] = agent_id
-        result = mem0_client.get_all(filters=filters)
+        client = _client_for(request, agent_id)
+        result = client.get_all(filters=filters)
         return result
     except Exception as e:
         logger.exception("get_memories failed")
@@ -249,13 +310,14 @@ async def get_memories(user_id: str = "hermes-user", agent_id: Optional[str] = N
 
 
 @app.post("/v1/memories/search")
-async def search_memories(req: SearchRequest):
+async def search_memories(req: SearchRequest, request: Request):
     """Semantic search across memories."""
     try:
         filters = {"user_id": req.user_id}
         if req.agent_id:
             filters["agent_id"] = req.agent_id
-        result = mem0_client.search(query=req.query, filters=filters, top_k=req.top_k)
+        client = _client_for(request, req.agent_id)
+        result = client.search(query=req.query, filters=filters, top_k=req.top_k)
         return result
     except Exception as e:
         logger.exception("search_memories failed")
@@ -286,10 +348,11 @@ async def update_memory_stock(memory_id: str, req: StockUpdateRequest):
 
 @app.delete("/v1/memories/{memory_id}")
 @app.delete("/memories/{memory_id}")
-async def delete_memory(memory_id: str):
+async def delete_memory(memory_id: str, request: Request):
     """Delete a memory by ID for legacy and stock Hermes clients."""
     try:
-        mem0_client.delete(memory_id=memory_id)
+        client = _client_for(request, None)
+        client.delete(memory_id=memory_id)
         return {"status": "deleted", "id": memory_id}
     except Exception as e:
         logger.exception("delete_memory failed")
@@ -329,12 +392,13 @@ class V3SearchRequest(BaseModel):
 
 @app.post("/v3/memories/add/")
 @app.post("/memories")
-async def add_v3(req: V3AddRequest):
+async def add_v3(req: V3AddRequest, request: Request):
     """Store memories for MemoryClient and Hermes' stock self-hosted backend."""
     try:
         if not req.messages:
             raise HTTPException(400, "Provide 'messages'")
-        result = mem0_client.add(
+        client = _client_for(request, req.agent_id)
+        result = client.add(
             messages=req.messages,
             user_id=req.user_id,
             agent_id=req.agent_id,
@@ -350,7 +414,7 @@ async def add_v3(req: V3AddRequest):
 
 
 @app.post("/v3/memories/")
-async def get_all_v3(req: V3GetAllRequest):
+async def get_all_v3(req: V3GetAllRequest, request: Request):
     """MemoryClient.get_all — extracts filters from body."""
     try:
         user_id = req.filters.get("user_id", "hermes-user")
@@ -358,7 +422,8 @@ async def get_all_v3(req: V3GetAllRequest):
         f = {"user_id": user_id}
         if agent_id:
             f["agent_id"] = agent_id
-        result = mem0_client.get_all(filters=f)
+        client = _client_for(request, agent_id)
+        result = client.get_all(filters=f)
         return result
     except Exception as e:
         logger.exception("get_all_v3 failed")
@@ -367,7 +432,7 @@ async def get_all_v3(req: V3GetAllRequest):
 
 @app.post("/v3/memories/search/")
 @app.post("/search")
-async def search_v3(req: V3SearchRequest):
+async def search_v3(req: V3SearchRequest, request: Request):
     """Search memories for MemoryClient and Hermes' stock self-hosted backend."""
     try:
         user_id = req.filters.get("user_id", "hermes-user")
@@ -375,7 +440,8 @@ async def search_v3(req: V3SearchRequest):
         f = {"user_id": user_id}
         if agent_id:
             f["agent_id"] = agent_id
-        result = mem0_client.search(query=req.query, filters=f, top_k=req.top_k)
+        client = _client_for(request, agent_id)
+        result = client.search(query=req.query, filters=f, top_k=req.top_k)
         logger.debug("[SEARCH_V3 RESULT] results=%d", 
             len(result.get("results", result) if isinstance(result, dict) else result))
         return result

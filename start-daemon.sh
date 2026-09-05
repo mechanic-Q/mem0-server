@@ -17,6 +17,10 @@ QDRANT_BIN="$HOME/.local/bin/qdrant"
 LOG_FILE="$SERVER_DIR/server.log"
 LOCK_FILE="$SERVER_DIR/.data-operation.lock"
 
+# Isolated per-agent collections (JSON: collection name -> owner agent_id).
+# mem0_zcode = ZCode CLI 记忆池（写隔离：Hermes 检索看不到；读共享池用 X-Mem0-Collection 头）
+EXTRA_COLLECTIONS="${EXTRA_COLLECTIONS:-{\"mem0_zcode\": \"zcode\"}}"
+
 if [[ "${1:-start}" != "status" && "${MEM0_DATA_LOCK_HELD:-0}" != "1" ]]; then
     command -v flock >/dev/null 2>&1 || { echo "Missing command: flock" >&2; exit 1; }
     exec 9>"$LOCK_FILE"
@@ -55,7 +59,7 @@ case "${1:-start}" in
         tmux send-keys -t "$SESSION_NAME" "cd '$QDRANT_DIR' && QDRANT__SERVICE__HOST=127.0.0.1 '$QDRANT_BIN'" Enter 9>&-
         sleep 2
         tmux split-window -v -t "$SESSION_NAME" 9>&-
-        tmux send-keys -t "$SESSION_NAME" "cd '$SERVER_DIR' && '$VENV_PYTHON' '$SERVER_SCRIPT'" Enter 9>&-
+        tmux send-keys -t "$SESSION_NAME" "cd '$SERVER_DIR' && EXTRA_COLLECTIONS='$EXTRA_COLLECTIONS' '$VENV_PYTHON' '$SERVER_SCRIPT'" Enter 9>&-
 
         # 轮询健康检查最多 30 秒
         echo "   Waiting for services (30s timeout)..."
