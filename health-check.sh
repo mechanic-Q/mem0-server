@@ -37,6 +37,12 @@ if [ "$HOUR" -ge 10 ]; then
 fi
 
 if health_check; then
+    # ── 失败重放: pending 队列非空时触发补提取（堵"提取失败内容永久丢失"） ──
+    if [ -s "$SCRIPT_DIR/pending_extractions.jsonl" ]; then
+        RESULT=$(curl -sf -m 900 -X POST "http://127.0.0.1:$PORT/v1/retry-pending" \
+            -H "Content-Type: application/json" -d '{"limit": 50}' 2>/dev/null || true)
+        echo "$(ts) [OK] pending replay triggered: ${RESULT:-no response}" >> "$LOG_FILE"
+    fi
     exit 0
 fi
 

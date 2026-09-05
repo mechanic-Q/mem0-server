@@ -17,7 +17,10 @@ Collection routing (physical isolation between agents):
 
 import os
 import json
+import hashlib
 import logging
+import threading
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
@@ -49,6 +52,14 @@ MODEL_FILE = os.path.join(MODEL_DIR, "model_q4f16.onnx")
 EMBED_DIM = 896
 
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 失败重放队列：全链 LLM 失败的 add 请求落盘，由 health-check cron 调
+# /v1/retry-pending 补提取——堵"提取失败内容永久丢失"的洞。运行时数据，不入 git。
+PENDING_PATH = os.path.join(SERVER_DIR, "pending_extractions.jsonl")
+DEADLETTER_PATH = os.path.join(SERVER_DIR, "pending_dead_letter.jsonl")
+PENDING_DEADLINE_DAYS = 5          # 入队超过 5 天仍失败 → 转入 dead-letter
+PENDING_RETRY_BATCH = 50           # 每次 retry-pending 最多重放条数
+_pending_lock = threading.Lock()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("mem0-server")
@@ -219,6 +230,14 @@ for _name, _owner in EXTRA_COLLECTIONS.items():
     _collections[_name] = Memory.from_config(_cfg)
     logger.info("isolated collection ready: %s (owner agent_id=%s)", _name, _owner)
 
+def _client_for_agent(agent_id: str) -> Memory:
+    """Collection for an agent_id: EXTRA_COLLECTIONS owner match, else shared."""
+    for _name, _owner in EXTRA_COLLECTIONS.items():
+        if agent_id and agent_id == _owner:
+            return _collections[_name]
+    return mem0_client
+
+
 def _client_for(req: Request, agent_id: str, legacy_collection: Optional[str] = None) -> Memory:
     """Pick the Memory client for a request.
 
@@ -230,10 +249,86 @@ def _client_for(req: Request, agent_id: str, legacy_collection: Optional[str] = 
         return _collections[header]
     if legacy_collection and legacy_collection in _collections:
         return _collections[legacy_collection]
-    for _name, _owner in EXTRA_COLLECTIONS.items():
-        if agent_id and agent_id == _owner:
-            return _collections[_name]
-    return mem0_client
+    return _client_for_agent(agent_id)
+
+
+# ---------------------------------------------------------------------------
+# Pending replay queue — add() calls whose LLM extraction failed on every
+# provider are queued to pending_extractions.jsonl and replayed by
+# POST /v1/retry-pending (health-check.sh triggers it when the file is
+# non-empty). Covers both loss paths: a raised exception and FallbackLLM's
+# graceful empty stub.
+# ---------------------------------------------------------------------------
+def _pending_hash(user_id: str, agent_id: str, messages) -> str:
+    basis = json.dumps({"u": user_id, "a": agent_id, "m": messages},
+                       ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
+def _record_pending(user_id, agent_id, messages, metadata, infer, error=""):
+    """Queue a failed add() for later replay. Dedup by content hash."""
+    now = datetime.now().isoformat(timespec="seconds")
+    entry = {
+        "v": 1,
+        "hash": _pending_hash(user_id, agent_id, messages),
+        "first_ts": now,
+        "last_ts": now,
+        "attempts": 0,
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "messages": messages,
+        "metadata": metadata,
+        "infer": infer,
+        "last_error": str(error)[:300],
+    }
+    with _pending_lock:
+        try:
+            if os.path.exists(PENDING_PATH):
+                with open(PENDING_PATH, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            if json.loads(line).get("hash") == entry["hash"]:
+                                logger.info("pending replay: hash already queued, skip")
+                                return
+                        except json.JSONDecodeError:
+                            continue
+            with open(PENDING_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except IOError as e:
+            logger.warning("pending replay: write failed: %s", e)
+            return
+    logger.warning("pending replay: queued (user=%s agent=%s hash=%s err=%s)",
+                   user_id, agent_id, entry["hash"][:12], str(error)[:120])
+
+
+def _pending_count() -> int:
+    try:
+        with open(PENDING_PATH, encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except IOError:
+        return 0
+
+
+def _add_with_replay(client: Memory, user_id: str, agent_id: str,
+                     messages, metadata, infer: bool):
+    """client.add() with failure capture into the pending replay queue."""
+    llm = getattr(client, "llm", None)
+    if llm is not None and hasattr(llm, "_last_degraded"):
+        llm._last_degraded = False
+    try:
+        result = client.add(messages=messages, user_id=user_id,
+                            agent_id=agent_id, infer=infer, metadata=metadata)
+    except Exception as e:
+        _record_pending(user_id, agent_id, messages, metadata, infer,
+                        error=f"add failed: {e}")
+        raise
+    if llm is not None and getattr(llm, "_last_degraded", False):
+        _record_pending(user_id, agent_id, messages, metadata, infer,
+                        error="all providers exhausted (degraded empty stub)")
+    return result
 
 logger.info("LLM chain: %s", " → ".join(p["name"] for p in LLM_CHAIN))
 
@@ -282,6 +377,7 @@ async def health():
         "vector_store": f"Qdrant @ {QDRANT_HOST}:{QDRANT_PORT}",
         "collection": COLLECTION_NAME,
         "extra_collections": list(_collections.keys()),
+        "pending_replay": _pending_count(),
         "sdk": "mem0ai (dedup/merge/extraction)",
     }
 
@@ -300,11 +396,10 @@ async def add_memory(req: AddRequest, request: Request):
         kwargs["user_id"] = req.user_id
         kwargs["agent_id"] = req.agent_id
         kwargs["infer"] = req.infer
-        if req.metadata:
-            kwargs["metadata"] = req.metadata
 
         client = _client_for(request, req.agent_id)
-        result = client.add(**kwargs)
+        result = _add_with_replay(client, req.user_id, req.agent_id,
+                                  kwargs["messages"], req.metadata, req.infer)
         if isinstance(result, dict):
             return result
         return {"results": result}
@@ -379,6 +474,95 @@ async def delete_memory(memory_id: str, request: Request):
         raise HTTPException(500, str(e))
 
 
+class RetryPendingRequest(BaseModel):
+    limit: int = Field(default=PENDING_RETRY_BATCH, ge=1, le=500)
+
+
+@app.post("/v1/retry-pending")
+async def retry_pending(req: RetryPendingRequest, request: Request):
+    """Replay queued extractions that failed while every LLM provider was down.
+
+    Success = add() completes without exception and without the degraded stub.
+    Entries older than PENDING_DEADLINE_DAYS move to the dead-letter file.
+    """
+    now = datetime.now()
+    deadline = timedelta(days=PENDING_DEADLINE_DAYS)
+    due, keep, dead = [], [], []
+    queued = 0
+    with _pending_lock:
+        try:
+            with open(PENDING_PATH, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    queued += 1
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        dead.append({"raw": line, "reason": "corrupt line"})
+                        continue
+                    try:
+                        first = datetime.fromisoformat(entry["first_ts"])
+                    except (KeyError, ValueError):
+                        first = now
+                    if now - first > deadline:
+                        dead.append(entry)
+                    else:
+                        due.append(entry)
+        except IOError:
+            return {"queued": 0, "retried": 0, "succeeded": 0,
+                    "dead_lettered": 0, "remaining": 0}
+
+    succeeded = 0
+    for entry in due[:req.limit]:
+        client = _client_for_agent(entry.get("agent_id"))
+        try:
+            _add_with_replay(client, entry.get("user_id", "hermes-user"),
+                             entry.get("agent_id", "hermes"),
+                             entry["messages"], entry.get("metadata"),
+                             entry.get("infer", True))
+            succeeded += 1
+        except Exception as e:
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            entry["last_ts"] = datetime.now().isoformat(timespec="seconds")
+            entry["last_error"] = str(e)[:300]
+            keep.append(entry)
+            continue
+        llm = getattr(client, "llm", None)
+        if getattr(llm, "_last_degraded", False):
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            entry["last_ts"] = datetime.now().isoformat(timespec="seconds")
+            entry["last_error"] = "replay still degraded"
+            keep.append(entry)
+
+    keep.extend(due[req.limit:])
+    remaining = len(keep)
+    with _pending_lock:
+        try:
+            tmp = PENDING_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for entry in keep:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            os.replace(tmp, PENDING_PATH)
+        except IOError as e:
+            logger.warning("pending replay: rewrite failed: %s", e)
+            remaining = queued  # unknown state — report conservatively
+        if dead:
+            try:
+                with open(DEADLETTER_PATH, "a", encoding="utf-8") as f:
+                    for entry in dead:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except IOError as e:
+                logger.warning("pending replay: dead-letter write failed: %s", e)
+
+    logger.info("pending replay: queued=%d due=%d succeeded=%d kept=%d dead=%d",
+                queued, len(due), succeeded, remaining, len(dead))
+    return {"queued": queued, "retried": min(len(due), req.limit),
+            "succeeded": succeeded, "dead_lettered": len(dead),
+            "remaining": remaining}
+
+
 # ---------------------------------------------------------------------------
 # Legacy MemoryClient-compatible endpoints
 # ---------------------------------------------------------------------------
@@ -418,13 +602,8 @@ async def add_v3(req: V3AddRequest, request: Request):
         if not req.messages:
             raise HTTPException(400, "Provide 'messages'")
         client = _client_for(request, req.agent_id)
-        result = client.add(
-            messages=req.messages,
-            user_id=req.user_id,
-            agent_id=req.agent_id,
-            infer=req.infer,
-            metadata=req.metadata,
-        )
+        result = _add_with_replay(client, req.user_id, req.agent_id,
+                                  req.messages, req.metadata, req.infer)
         if isinstance(result, dict):
             return result
         return {"results": result}

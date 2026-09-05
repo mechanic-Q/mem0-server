@@ -93,6 +93,10 @@ class FallbackLLM(OpenAILLM):
         config.model = primary["model"]
         config.openai_base_url = primary["base_url"]
         config.api_key = primary["api_key"]
+        # True when the last generate_response ended in the graceful empty stub
+        # (all providers exhausted) — server.py reads this after add() to queue
+        # the turn for replay. Reset at the start of every call.
+        self._last_degraded = False
         super().__init__(config)
         # Override client with short timeout
         self.client = OpenAI(
@@ -103,6 +107,7 @@ class FallbackLLM(OpenAILLM):
 
     def generate_response(self, messages, response_format=None,
                           tools=None, tool_choice="auto", **kwargs):
+        self._last_degraded = False
         last_error = None
         blacklist = _load_blacklist()
         attempted = 0
@@ -166,7 +171,10 @@ class FallbackLLM(OpenAILLM):
                     continue
                 raise
 
-        # All available providers exhausted
+        # All available providers exhausted — flag unconditionally: mem0's
+        # Memory.add swallows LLM exceptions internally ("LLM extraction
+        # failed"), so server.py can only detect total failure via this flag.
+        self._last_degraded = True
         bl_count = len(blacklist)
         total = len(self._providers)
         logger.error(

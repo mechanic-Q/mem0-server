@@ -27,3 +27,7 @@ health-check.log
 .data-operation.lock
 *.snapshot
 embeddings-watchdog.log
+embeddings-server.log.*
+# Pending replay queue — runtime data, never committed
+pending_extractions.jsonl
+pending_dead_letter.jsonl
