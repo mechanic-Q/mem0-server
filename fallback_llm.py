@@ -98,11 +98,12 @@ class FallbackLLM(OpenAILLM):
         # the turn for replay. Reset at the start of every call.
         self._last_degraded = False
         super().__init__(config)
-        # Override client with short timeout
+        # Override client with short timeout (per-provider override via
+        # "timeout" key in the chain entry — the local CPU tail needs 120s)
         self.client = OpenAI(
             api_key=config.api_key,
             base_url=config.openai_base_url,
-            timeout=20.0,
+            timeout=primary.get("timeout", 20.0),
         )
 
     def generate_response(self, messages, response_format=None,
@@ -127,9 +128,23 @@ class FallbackLLM(OpenAILLM):
                         timeout=20.0,
                     )
                     self.config.model = provider["model"]
+                call_format = response_format
+                if (provider.get("json_schema_guarantee")
+                        and response_format == {"type": "json_object"}):
+                    # 解码层硬保证：llama-server 的 json_object 只是提示级约束
+                    #（模型偶发输出 ```json 围栏），json_schema 才走 GBNF 语法
+                    # 强制。用裸 {"type": "object"} 保语法不限字段——mem0 的
+                    # 提取与去重决策调用字段形状各异，不能锁死 schema。
+                    call_format = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "response",
+                            "schema": {"type": "object"},
+                        },
+                    }
                 result = super().generate_response(
-                    messages, response_format, tools, tool_choice,
-                    timeout=20.0, **kwargs
+                    messages, call_format, tools, tool_choice,
+                    timeout=provider.get("timeout", 20.0), **kwargs
                 )
                 # Guard: some free models return 200 with null content
                 if result is None:

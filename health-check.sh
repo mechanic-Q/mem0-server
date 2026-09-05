@@ -37,6 +37,10 @@ if [ "$HOUR" -ge 10 ]; then
 fi
 
 if health_check; then
+    # ── 本地提取 llama-server 保活（链尾兜底，挂了自动拉起） ──
+    if ! curl -sf "http://127.0.0.1:${LLAMA_PORT:-8887}/health" >/dev/null 2>&1; then
+        "$SCRIPT_DIR/start-llama-server.sh" start >> "$LOG_FILE" 2>&1 || true
+    fi
     # ── 失败重放: pending 队列非空时触发补提取（堵"提取失败内容永久丢失"） ──
     if [ -s "$SCRIPT_DIR/pending_extractions.jsonl" ]; then
         RESULT=$(curl -sf -m 900 -X POST "http://127.0.0.1:$PORT/v1/retry-pending" \

@@ -25,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from mem0 import Memory
 from qdrant_client import QdrantClient
@@ -155,6 +156,23 @@ if os.environ.get("MEM0_DISABLE_9ROUTER", "") != "1":
             "api_key": NINE_ROUTER_KEY,
             "model": model_id,
         })
+
+# 本地兜底链尾 — llama.cpp llama-server（CPU-only，GLM-4.7-Flash-IQ4_XS 30B-A3B，
+# 2026-09-06 实测 5-6s/次提取，JSON 3/3）。永不欠费、永不 429，远程全挂时的
+# 最后防线；常驻由 start-llama-server.sh（tmux）+ health-check 保活管理。
+# json_schema_guarantee: FallbackLLM 把 json_object 升级为 json_schema 语法强制，
+# 在解码层保证合法 JSON（见 fallback_llm.py）。
+# MEM0_DISABLE_LOCAL=1 可整段摘除。
+LOCAL_LLM_KEY = "sk-local-extraction"
+if os.environ.get("MEM0_DISABLE_LOCAL", "") != "1":
+    LLM_CHAIN.append({
+        "name": "Local/extraction",
+        "base_url": os.environ.get("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8887/v1"),
+        "api_key": LOCAL_LLM_KEY,
+        "model": "glm-4.7-flash-iq4_xs",
+        "json_schema_guarantee": True,
+        "timeout": 120.0,   # CPU 推理慢：千 token 提取 prompt 需 30-60s
+    })
 
 if not LLM_CHAIN:
     raise RuntimeError("No LLM API keys found. Add .zhipu_key, .agnes_key, or .nvidia_key to ~/.mem0-server/")
@@ -312,23 +330,35 @@ def _pending_count() -> int:
         return 0
 
 
+# 本地 CPU 提取单次 30-90s。add 是同步阻塞调用：必须放线程池执行，否则会堵死
+# 事件循环，/v1/health 无响应会被 process-watchdog（--max-time 5）误判死亡并
+# kill-session——远程链全挂时的长时间阻塞同样会触发，这是既有隐患。
+_add_lock = threading.Lock()
+
+
 def _add_with_replay(client: Memory, user_id: str, agent_id: str,
                      messages, metadata, infer: bool):
-    """client.add() with failure capture into the pending replay queue."""
-    llm = getattr(client, "llm", None)
-    if llm is not None and hasattr(llm, "_last_degraded"):
-        llm._last_degraded = False
-    try:
-        result = client.add(messages=messages, user_id=user_id,
-                            agent_id=agent_id, infer=infer, metadata=metadata)
-    except Exception as e:
-        _record_pending(user_id, agent_id, messages, metadata, infer,
-                        error=f"add failed: {e}")
-        raise
-    if llm is not None and getattr(llm, "_last_degraded", False):
-        _record_pending(user_id, agent_id, messages, metadata, infer,
-                        error="all providers exhausted (degraded empty stub)")
-    return result
+    """Blocking add() with failure capture into the pending replay queue.
+
+    Serialized on _add_lock (mem0 client is not concurrency-safe; the event
+    loop previously provided this serialization implicitly). Callers in async
+    endpoints must go through run_in_threadpool.
+    """
+    with _add_lock:
+        llm = getattr(client, "llm", None)
+        if llm is not None and hasattr(llm, "_last_degraded"):
+            llm._last_degraded = False
+        try:
+            result = client.add(messages=messages, user_id=user_id,
+                                agent_id=agent_id, infer=infer, metadata=metadata)
+        except Exception as e:
+            _record_pending(user_id, agent_id, messages, metadata, infer,
+                            error=f"add failed: {e}")
+            raise
+        if llm is not None and getattr(llm, "_last_degraded", False):
+            _record_pending(user_id, agent_id, messages, metadata, infer,
+                            error="all providers exhausted (degraded empty stub)")
+        return result
 
 logger.info("LLM chain: %s", " → ".join(p["name"] for p in LLM_CHAIN))
 
@@ -398,8 +428,9 @@ async def add_memory(req: AddRequest, request: Request):
         kwargs["infer"] = req.infer
 
         client = _client_for(request, req.agent_id)
-        result = _add_with_replay(client, req.user_id, req.agent_id,
-                                  kwargs["messages"], req.metadata, req.infer)
+        result = await run_in_threadpool(
+            _add_with_replay, client, req.user_id, req.agent_id,
+            kwargs["messages"], req.metadata, req.infer)
         if isinstance(result, dict):
             return result
         return {"results": result}
@@ -518,10 +549,11 @@ async def retry_pending(req: RetryPendingRequest, request: Request):
     for entry in due[:req.limit]:
         client = _client_for_agent(entry.get("agent_id"))
         try:
-            _add_with_replay(client, entry.get("user_id", "hermes-user"),
-                             entry.get("agent_id", "hermes"),
-                             entry["messages"], entry.get("metadata"),
-                             entry.get("infer", True))
+            await run_in_threadpool(
+                _add_with_replay, client, entry.get("user_id", "hermes-user"),
+                entry.get("agent_id", "hermes"),
+                entry["messages"], entry.get("metadata"),
+                entry.get("infer", True))
             succeeded += 1
         except Exception as e:
             entry["attempts"] = entry.get("attempts", 0) + 1
@@ -602,8 +634,9 @@ async def add_v3(req: V3AddRequest, request: Request):
         if not req.messages:
             raise HTTPException(400, "Provide 'messages'")
         client = _client_for(request, req.agent_id)
-        result = _add_with_replay(client, req.user_id, req.agent_id,
-                                  req.messages, req.metadata, req.infer)
+        result = await run_in_threadpool(
+            _add_with_replay, client, req.user_id, req.agent_id,
+            req.messages, req.metadata, req.infer)
         if isinstance(result, dict):
             return result
         return {"results": result}
