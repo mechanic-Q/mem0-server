@@ -125,6 +125,26 @@ if NVIDIA_KEY:
             "model": model_id,
         })
 
+# 9router 免费线 — 2026-09-04 实测通过（mem0 风格 JSON mode + 中文提取 + 2×稳定性探针，
+# 探针记录见 Hermes 会话 20260904_211851_a5bbfa）。本地聚合代理（localhost:20128）免鉴权，
+# 占位 key 仅为满足 OpenAI client 字段。置于直连链之后作免配额兜底。
+# MEM0_DISABLE_9ROUTER=1 可整段摘除（故障演练用，无需重启 9router）。
+NINE_ROUTER_KEY = _load_key(".9router_key") or "sk-9router-local"
+if os.environ.get("MEM0_DISABLE_9ROUTER", "") != "1":
+    for model_name, model_id in [
+        ("9router/GLM-5.3-Flash", "glm/glm-5.3-flash"),                     # 3.5-4.0s 最稳
+        ("9router/Llama-3.3-70B-FP8-Fast", "cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+        ("9router/Mistral-Small-3.1-24B", "cf/@cf/mistralai/mistral-small-3.1-24b-instruct"),
+        ("9router/Llama-3.1-70B-FP8-Fast", "cf/@cf/meta/llama-3.1-70b-instruct-fp8-fast"),
+        ("9router/MiniMax-M3", "nvidia/minimaxai/minimax-m3"),              # 3-15s 波动大，殿后
+    ]:
+        LLM_CHAIN.append({
+            "name": model_name,
+            "base_url": "http://localhost:20128/v1",
+            "api_key": NINE_ROUTER_KEY,
+            "model": model_id,
+        })
+
 if not LLM_CHAIN:
     raise RuntimeError("No LLM API keys found. Add .zhipu_key, .agnes_key, or .nvidia_key to ~/.mem0-server/")
 
