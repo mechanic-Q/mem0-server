@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="360" viewBox="0 0 1200 360"
+     role="img" aria-labelledby="bp-title bp-desc">
+  <title id="bp-title">数据保护闭环</title>
+  <desc id="bp-desc">backup.sh 生成包含 Qdrant snapshot、SQLite 备份、全量 ID+payload 基线与校验和的保护包；data_guard.py 逐条验证不允许任何旧记忆丢失或篡改，restore-verify 在随机临时端口做隔离恢复演练；任一验证失败即非零退出。</desc>
+
+  <rect width="1200" height="360" rx="26" fill="#0b0f14"/>
+
+  <text x="64" y="66" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="32" font-weight="800" fill="#e6edf3">数据保护闭环</text>
+  <text x="1136" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="16" fill="#8b949e" text-anchor="end">安装器升级前自动创建 pre-install 保护包</text>
+
+  <!-- 第一行：备份 → 保护包 -->
+  <rect x="64" y="104" width="196" height="72" rx="10" fill="#161b22" stroke="#2dd4bf" stroke-opacity="0.55"/>
+  <text x="162" y="134" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="19" font-weight="700" fill="#2dd4bf" text-anchor="middle">backup.sh</text>
+  <text x="162" y="158" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="15" fill="#8b949e" text-anchor="middle">一条命令 · 自动保留 7 份</text>
+
+  <path d="M 268 140 L 300 140" stroke="#2d333b" stroke-width="2"/>
+  <path d="M 293 135 L 300 141 L 293 147" stroke="#2d333b" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+  <rect x="308" y="104" width="560" height="72" rx="10" fill="#161b22" stroke="#2d333b"/>
+  <text x="328" y="130" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="16" fill="#8b949e">保护包 ~/mem0-backups/auto/&lt;时间戳&gt;/</text>
+  <text x="328" y="158" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="15" fill="#c3cad3">qdrant-snapshot · history.db · payload.jsonl · SHA256SUMS</text>
+
+  <path d="M 876 140 L 908 140" stroke="#2d333b" stroke-width="2"/>
+  <path d="M 901 135 L 908 141 L 901 147" stroke="#2d333b" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+  <rect x="916" y="104" width="220" height="72" rx="10" fill="#161b22" stroke="#2d333b"/>
+  <text x="1026" y="134" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="18" font-weight="700" fill="#e6edf3" text-anchor="middle">manifest.json</text>
+  <text x="1026" y="158" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="15" fill="#8b949e" text-anchor="middle">清单 + 校验和</text>
+
+  <!-- 第二行：两条验证路径 -->
+  <rect x="64" y="208" width="528" height="96" rx="10" fill="#161b22" stroke="#2d333b"/>
+  <rect x="64" y="208" width="4" height="96" rx="2" fill="#2dd4bf"/>
+  <text x="96" y="240" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="18" font-weight="700" fill="#2dd4bf">data_guard.py verify</text>
+  <text x="96" y="266" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="16" fill="#c3cad3">逐条比对：允许新增，禁止任何旧 ID 消失或 payload 改变；</text>
+  <text x="96" y="290" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="16" fill="#c3cad3">Collection 保持 green，向量配置不变。</text>
+
+  <rect x="608" y="208" width="528" height="96" rx="10" fill="#161b22" stroke="#2d333b"/>
+  <rect x="608" y="208" width="4" height="96" rx="2" fill="#d29922"/>
+  <text x="640" y="240" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="18" font-weight="700" fill="#d29922">data_guard.py restore-verify</text>
+  <text x="640" y="266" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="16" fill="#c3cad3">随机临时端口拉起第二个 Qdrant，恢复后逐条比较，</text>
+  <text x="640" y="290" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+        font-size="16" fill="#c3cad3">自动清理；不触碰正式 6333。</text>
+
+  <!-- 结论行 -->
+  <text x="64" y="336" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="17" fill="#8b949e">任一验证失败 → 非零退出，不报告成功。</text>
+</svg>

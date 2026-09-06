@@ -1,6 +1,22 @@
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="mem0-server：把 AI Agent 的长期记忆搬回本地——LLM 用你自己的 Key，KaLM 本地嵌入与 Qdrant 向量库零外部依赖，只监听 127.0.0.1">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/平台-Windows_WSL2-2dd4bf" alt="运行平台：Windows WSL2">
+  &nbsp;
+  <img src="https://img.shields.io/badge/嵌入-KaLM_ONNX_896维_本地-2dd4bf" alt="本地 KaLM ONNX 嵌入，896 维">
+  &nbsp;
+  <img src="https://img.shields.io/badge/向量库-Qdrant_1.17.1-2dd4bf" alt="本地 Qdrant 1.17.1 向量库">
+  &nbsp;
+  <img src="https://img.shields.io/badge/安全-仅监听_127.0.0.1-d29922" alt="仅监听 127.0.0.1，不向局域网暴露">
+  &nbsp;
+  <img src="https://img.shields.io/badge/License-Proprietary_Source--Available-d29922" alt="Proprietary Source-Available License">
+</p>
+
 # mem0-server
 
-面向 Windows WSL2 + Hermes Agent 的本地长期记忆服务。
+面向 Windows WSL2 + Hermes Agent 的本地长期记忆服务：事实抽取用你自己的远程 LLM Key（多 Provider 自动回退），嵌入与向量检索完全本地——KaLM Q4F16 ONNX（896 维）+ Qdrant，零 API 成本，记忆数据不出电脑。
 
 > **给 Agent(另一台 Hermes / AI 编码助手)**: 执行前先读 **HERMES.md**。
 > 它定义了「首次安装」与「升级后恢复适配」两个场景的完整流程、检查点、密钥配置和自动化下载清单。
@@ -122,6 +138,10 @@ SHA-256: c5eb8abd440e7778cead911606521f52e1b35067bb648484f2928d83f2b314b4
 模型及 tokenizer 不进入本仓库，由安装器下载并校验。KaLM 上游模型标注为 Apache-2.0；这是第三方资产许可，不改变本仓库许可。
 
 ## 数据保护
+
+<p align="center">
+  <img src="./assets/readme/backup-loop.svg" width="100%" alt="数据保护闭环：backup.sh 生成 snapshot + SQLite + JSONL 基线 + 校验和的保护包；data_guard.py verify 逐条验证不允许丢失或篡改；restore-verify 在随机临时端口做隔离恢复演练；任一验证失败即非零退出">
+</p>
 
 ### 一致性备份
 

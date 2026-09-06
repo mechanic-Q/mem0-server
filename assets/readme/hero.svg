@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="400" viewBox="0 0 1200 400"
+     role="img" aria-labelledby="h-title h-desc">
+  <title id="h-title">mem0-server — 自托管 AI Agent 长期记忆服务</title>
+  <desc id="h-desc">左侧为项目名与一句话介绍：把 AI Agent 的长期记忆搬回本地，LLM 用自己的 Key，嵌入与向量库零外部依赖。右侧为三层架构示意：客户端经 127.0.0.1:8050 调用 mem0-server（内含多 Provider 回退的 LLM 事实抽取与 KaLM 本地嵌入），再写入 127.0.0.1:6333 的 Qdrant 向量库。</desc>
+
+  <rect width="1200" height="400" rx="26" fill="#0b0f14"/>
+
+  <!-- ===== 左：标题块 ===== -->
+  <g id="title-block" transform="translate(64 0)">
+    <text x="0" y="98" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="18" letter-spacing="2" fill="#2dd4bf">SELF-HOSTED · 127.0.0.1 ONLY</text>
+
+    <text x="0" y="172" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="60" font-weight="800" fill="#e6edf3">mem0-server</text>
+
+    <text x="0" y="224" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="24" fill="#c3cad3">把 AI Agent 的长期记忆搬回本地——</text>
+    <text x="0" y="258" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="24" fill="#c3cad3">LLM 用你自己的 Key，嵌入与向量库零外部依赖。</text>
+
+    <text x="0" y="314" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="17" fill="#8b949e">KaLM ONNX 本地嵌入 · 896 维</text>
+    <text x="0" y="342" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="17" fill="#8b949e">Qdrant 1.17.1 · 一键幂等部署 · 旧数据零丢失迁移</text>
+  </g>
+
+  <!-- ===== 右：三层栈 ===== -->
+  <g id="stack">
+    <!-- 客户端层 -->
+    <rect x="660" y="60" width="476" height="66" rx="10" fill="#161b22" stroke="#2d333b"/>
+    <text x="692" y="88" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="20" font-weight="700" fill="#e6edf3">Hermes Agent · 任意 mem0 客户端</text>
+    <text x="692" y="112" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="15" fill="#8b949e">POST /memories · POST /search · PUT · DELETE</text>
+
+    <path d="M 898 126 L 898 150" stroke="#2d333b" stroke-width="2"/>
+    <path d="M 893 144 L 898 151 L 903 144" stroke="#2d333b" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <rect x="920" y="128" width="120" height="22" rx="6" fill="#2dd4bf" opacity="0.14"/>
+    <text x="980" y="144" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="14" fill="#2dd4bf" text-anchor="middle">:8050</text>
+
+    <!-- mem0-server 层 -->
+    <rect x="660" y="156" width="476" height="104" rx="10" fill="#161b22" stroke="#2dd4bf" stroke-opacity="0.55"/>
+    <text x="692" y="186" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="20" font-weight="700" fill="#e6edf3">mem0-server</text>
+    <text x="692" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="15" fill="#8b949e">FastAPI · mem0 SDK · 官方 Hermes 兼容入口</text>
+    <rect x="692" y="222" width="196" height="26" rx="6" fill="#d29922" opacity="0.14"/>
+    <text x="790" y="240" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="15" fill="#d29922" text-anchor="middle">LLM 事实抽取 · 你的 Key</text>
+    <rect x="904" y="222" width="200" height="26" rx="6" fill="#2dd4bf" opacity="0.14"/>
+    <text x="1004" y="240" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="15" fill="#2dd4bf" text-anchor="middle">KaLM ONNX · 进程内嵌入</text>
+
+    <path d="M 898 260 L 898 284" stroke="#2d333b" stroke-width="2"/>
+    <path d="M 893 278 L 898 285 L 903 278" stroke="#2d333b" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <rect x="920" y="262" width="120" height="22" rx="6" fill="#2dd4bf" opacity="0.14"/>
+    <text x="980" y="278" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="14" fill="#2dd4bf" text-anchor="middle">:6333</text>
+
+    <!-- Qdrant 层 -->
+    <rect x="660" y="290" width="476" height="66" rx="10" fill="#161b22" stroke="#2d333b"/>
+    <text x="692" y="318" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+          font-size="20" font-weight="700" fill="#e6edf3">Qdrant 向量库</text>
+    <text x="692" y="342" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="15" fill="#8b949e">collection: mem0_shared · 896 维 · 本地持久化</text>
+  </g>
+</svg>
